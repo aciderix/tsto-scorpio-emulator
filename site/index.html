@@ -1,0 +1,570 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<script>
+window._capturedLogs = [];
+(function(){
+    var origLog = console.log, origWarn = console.warn, origErr = console.error;
+    function ts(){ return new Date().toISOString(); }
+    console.log = function(){
+        var args = Array.from(arguments);
+        window._capturedLogs.push({t: ts(), level:'LOG', msg: args.map(String).join(' ')});
+        origLog.apply(console, arguments);
+    };
+    console.warn = function(){
+        var args = Array.from(arguments);
+        window._capturedLogs.push({t: ts(), level:'WARN', msg: args.map(String).join(' ')});
+        origWarn.apply(console, arguments);
+    };
+    console.error = function(){
+        var args = Array.from(arguments);
+        window._capturedLogs.push({t: ts(), level:'ERR', msg: args.map(String).join(' ')});
+        origErr.apply(console, arguments);
+    };
+})();
+</script>
+
+    <meta charset="UTF-8">
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>🍩 TSTO Scorpio Web Emulator</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            background: #1a1a2e;
+            color: #eee;
+            font-family: 'Segoe UI', system-ui, sans-serif;
+            overflow: hidden;
+            height: 100vh;
+        }
+        
+        /* Loading overlay */
+        #loading-overlay {
+            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            background: #1a1a2e;
+            display: flex; flex-direction: column; align-items: center; justify-content: center;
+            z-index: 1000;
+            transition: opacity 0.5s;
+        }
+        #loading-overlay.hidden { opacity: 0; pointer-events: none; }
+        
+        .donut-spinner {
+            width: 120px; height: 120px;
+            border-radius: 50%;
+            border: 12px solid #16213e;
+            border-top: 12px solid #f7d354;
+            border-right: 12px solid #e94560;
+            animation: spin 1s linear infinite;
+            margin-bottom: 30px;
+            position: relative;
+        }
+        .donut-spinner::after {
+            content: '🍩';
+            position: absolute;
+            top: 50%; left: 50%;
+            transform: translate(-50%, -50%);
+            font-size: 40px;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        
+        .loading-title {
+            font-size: 28px; font-weight: bold;
+            color: #f7d354;
+            margin-bottom: 10px;
+        }
+        .loading-subtitle {
+            font-size: 14px; color: #888;
+            margin-bottom: 25px;
+        }
+        
+        .progress-container {
+            width: 400px; max-width: 90vw;
+            background: #16213e;
+            border-radius: 12px;
+            padding: 3px;
+            margin-bottom: 15px;
+        }
+        .progress-bar {
+            height: 24px;
+            background: linear-gradient(90deg, #e94560, #f7d354);
+            border-radius: 10px;
+            width: 0%;
+            transition: width 0.3s;
+            display: flex; align-items: center; justify-content: center;
+            font-size: 12px; font-weight: bold; color: #1a1a2e;
+        }
+        
+        .loading-status {
+            font-size: 13px; color: #aaa;
+            text-align: center;
+            min-height: 40px;
+        }
+        .loading-status .step { margin: 2px 0; }
+        .loading-status .step.done { color: #4ade80; }
+        .loading-status .step.active { color: #f7d354; }
+        .loading-status .step.pending { color: #555; }
+        
+        .cache-badge {
+            margin-top: 15px;
+            padding: 6px 16px;
+            background: #4ade8033;
+            border: 1px solid #4ade80;
+            border-radius: 20px;
+            font-size: 12px;
+            color: #4ade80;
+            display: none;
+        }
+        .cache-badge.visible { display: block; }
+        
+        /* Main UI */
+        #header {
+            background: linear-gradient(135deg, #16213e, #0f3460);
+            padding: 8px 20px;
+            display: flex; align-items: center; justify-content: space-between;
+            border-bottom: 2px solid #e94560;
+        }
+        #header h1 { font-size: 18px; color: #f7d354; }
+        #header .stats { font-size: 12px; color: #888; }
+        
+        #main-container {
+            display: flex;
+            height: calc(100vh - 46px);
+        }
+        
+        #canvas-container {
+            flex: 1;
+            min-width: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: #000;
+            position: relative;
+            overflow: hidden;
+        }
+        
+        #game-canvas {
+            background: #000;
+            cursor: pointer;
+        }
+        
+        #sidebar {
+            width: 340px;
+            min-width: 340px;
+            flex-shrink: 0;
+            background: #16213e;
+            overflow-y: auto;
+            padding: 12px;
+            border-left: 1px solid #333;
+        }
+        
+        .panel {
+            background: #1a1a2e;
+            border-radius: 8px;
+            padding: 12px;
+            margin-bottom: 10px;
+        }
+        .panel h3 {
+            font-size: 13px;
+            color: #f7d354;
+            margin-bottom: 8px;
+            border-bottom: 1px solid #333;
+            padding-bottom: 4px;
+        }
+        
+        #log-container {
+            height: 200px;
+            overflow-y: auto;
+            font-family: 'Cascadia Code', 'Fira Code', monospace;
+            font-size: 11px;
+            line-height: 1.4;
+            background: #0a0a1a;
+            padding: 8px;
+            border-radius: 6px;
+        }
+        #log-container .log-info { color: #4ade80; }
+        #log-container .log-warn { color: #f7d354; }
+        #log-container .log-error { color: #e94560; }
+        #log-container .log-gl { color: #60a5fa; }
+        
+        .btn {
+            padding: 8px 16px;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 13px;
+            font-weight: bold;
+            margin: 3px;
+            transition: all 0.2s;
+        }
+        .btn:hover { transform: scale(1.05); }
+        .btn-primary { background: #e94560; color: white; }
+        .btn-secondary { background: #0f3460; color: #eee; border: 1px solid #444; }
+        .btn:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
+        
+        .stat-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 6px;
+        }
+        .stat-item {
+            background: #0f3460;
+            padding: 6px 8px;
+            border-radius: 6px;
+            text-align: center;
+        }
+        .stat-value { font-size: 18px; font-weight: bold; color: #f7d354; }
+        .stat-label { font-size: 10px; color: #888; }
+        
+        .gl-calls-display {
+            font-family: monospace;
+            font-size: 11px;
+            max-height: 150px;
+            overflow-y: auto;
+            background: #0a0a1a;
+            padding: 6px;
+            border-radius: 4px;
+        }
+        .gl-call { color: #60a5fa; margin: 1px 0; }
+    </style>
+</head>
+<body>
+
+  <script>
+    // NUCLEAR: Kill ALL service workers immediately
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.getRegistrations().then(function(regs) {
+        regs.forEach(function(r) { 
+          r.unregister();
+          console.log('🗑️ Unregistered service worker:', r.scope);
+        });
+      });
+      // Also clear all caches
+      if (window.caches) {
+        caches.keys().then(function(names) {
+          names.forEach(function(name) {
+            caches.delete(name);
+            console.log('🗑️ Deleted cache:', name);
+          });
+        });
+      }
+    }
+    
+    // Version check
+    window.TSTO_EXPECTED_VERSION = 'v4';
+  </script>
+
+
+<!-- Loading Overlay -->
+<div id="loading-overlay">
+    <div class="donut-spinner"></div>
+    <div class="loading-title">TSTO Scorpio Web Emulator</div>
+    <div class="loading-subtitle">The Simpsons™: Tapped Out — ARM Emulation in your browser</div>
+    
+    <div class="progress-container">
+        <div class="progress-bar" id="progress-bar">0%</div>
+    </div>
+    
+    <div class="loading-status" id="loading-status">
+        <div class="step active" id="step-sw">⏳ Registering Service Worker...</div>
+        <div class="step pending" id="step-unicorn">⬜ Loading Unicorn.js ARM emulator...</div>
+        <div class="step pending" id="step-so">⬜ Loading libscorpio.so (26 MB)...</div>
+        <div class="step pending" id="step-elf">⬜ Parsing ELF binary...</div>
+        <div class="step pending" id="step-init">⬜ Initializing Scorpio engine...</div>
+    </div>
+    
+    <div class="cache-badge" id="cache-badge">⚡ Loaded from cache — instant!</div>
+</div>
+
+<!-- Main UI (hidden until loaded) -->
+<div id="header">
+    <h1>🍩 TSTO Scorpio Web Emulator</h1>
+    <div class="stats">
+        <span id="fps-display">0 FPS</span> •
+        <span id="insn-display">0 instructions</span> •
+        <span id="gl-count">0 GL calls</span>
+    </div>
+</div>
+
+<div id="main-container">
+    <div id="canvas-container">
+        <canvas id="game-canvas" width="1024" height="768"></canvas>
+    </div>
+    
+    <div id="sidebar">
+        <div class="panel">
+            <h3>🎮 Controls</h3>
+            <button class="btn btn-primary" id="btn-init" disabled>Initialize Engine</button>
+            <button class="btn btn-primary" id="btn-start" disabled>▶ Start Game Loop</button>
+            <button class="btn btn-secondary" id="btn-pause" disabled>⏸ Pause</button>
+            <button class="btn btn-secondary" id="btn-step" disabled>⏭ Step Frame</button>
+            <button class="btn btn-secondary" id="btn-full-render" style="background:#0f3460;margin-top:6px;width:100%">🟢 Simple Render</button>
+        </div>
+        
+        <div class="panel">
+            <h3>📊 Engine Stats</h3>
+            <div class="stat-grid">
+                <div class="stat-item">
+                    <div class="stat-value" id="stat-functions">0</div>
+                    <div class="stat-label">JNI Functions</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-value" id="stat-relocations">0</div>
+                    <div class="stat-label">Relocations</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-value" id="stat-symbols">0</div>
+                    <div class="stat-label">Symbols</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-value" id="stat-glcalls">0</div>
+                    <div class="stat-label">GL Calls</div>
+                </div>
+            </div>
+        </div>
+        
+        <div class="panel">
+            <h3>🔧 OpenGL → WebGL Bridge</h3>
+            <div class="gl-calls-display" id="gl-calls-log">
+                <i style="color:#555">GL calls will appear here...</i>
+            </div>
+        </div>
+        
+        <div class="panel">
+            <h3>📜 Engine Log</h3>
+            <div id="log-container"></div>
+        </div>
+    </div>
+</div>
+
+<!-- Scripts -->
+
+    <!-- Safety net for unicorn.js -->
+    <script>
+      // Global fallback for pthread_sigmask (in case unicorn.js Emscripten needs it)
+      window._pthread_sigmask = function() { return 0; };
+      
+      // Capture any uncaught abort errors with details
+      window.addEventListener('error', function(e) {
+        if (e.message && e.message.indexOf('abort') !== -1) {
+          console.error('🔴 Caught abort error:', e.message);
+          console.error('🔴 Source:', e.filename, 'line:', e.lineno);
+        }
+      });
+      
+      console.log('✅ TSTO v15.2 — VFS file I/O! ARM code can now load shaders natively!');
+    </script>
+
+    <script src="lib/unicorn2.js"></script>
+<script src="lib/unicorn2-wrapper.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+    <script src="js/dlc-loader.js"></script>
+    <script src="js/logger.js"></script>
+<script src="js/elf-loader.js"></script>
+<script src="js/vfs.js"></script>
+<script src="js/android-shims.js"></script>
+<script src="js/jni-bridge.js"></script>
+<script src="js/gl-bridge.js"></script>
+<script src="js/shader-manager.js"></script>
+<script src="js/scorpio-engine.js"></script>
+<script src="js/main.js"></script>
+
+<script>
+// ============================================
+// AUTO-LOADER with progress + cache detection
+// ============================================
+(function() {
+    const overlay = document.getElementById('loading-overlay');
+    const progressBar = document.getElementById('progress-bar');
+    const cacheBadge = document.getElementById('cache-badge');
+    
+    function setStep(id, state, text) {
+        const el = document.getElementById(id);
+        el.className = 'step ' + state;
+        if (text) el.textContent = text;
+    }
+    
+    function setProgress(pct) {
+        progressBar.style.width = pct + '%';
+        progressBar.textContent = Math.round(pct) + '%';
+    }
+    
+    async function boot() {
+        // Step 1: Service Worker
+        setStep('step-sw', 'active', '⏳ Registering Service Worker...');
+        try {
+            if ('serviceWorker' in navigator) {
+                await navigator.serviceWorker.register('/sw.js');
+                setStep('step-sw', 'done', '✅ Service Worker registered');
+            } else {
+                setStep('step-sw', 'done', '✅ Service Worker (not supported, skipped)');
+            }
+        } catch(e) {
+            setStep('step-sw', 'done', '✅ Service Worker (skipped)');
+        }
+        setProgress(10);
+        
+        // Step 2: Wait for Unicorn2 WASM to initialize
+        setStep('step-unicorn', 'active', '⏳ Loading Unicorn2 WASM engine (VFP support)...');
+        try {
+            if (window.uc && window.uc._readyPromise) {
+                await window.uc._readyPromise;
+            }
+            if (window.uc && window.uc.Unicorn) {
+                setStep('step-unicorn', 'done', '✅ Unicorn2 WASM loaded (VFP enabled!)');
+            } else {
+                setStep('step-unicorn', 'done', '⚠️ Unicorn2 init incomplete');
+            }
+        } catch(e) {
+            setStep('step-unicorn', 'done', '❌ Unicorn2 WASM failed: ' + e.message);
+        }
+        setProgress(25);
+        
+        // Step 3: Fetch libscorpio.so with progress
+        setStep('step-so', 'active', '⏳ Downloading libscorpio.so (26 MB)...');
+        const startTime = performance.now();
+        
+        let soBuffer;
+        try {
+            const response = await fetch('/bin/libscorpio.so');
+            const contentLength = response.headers.get('content-length');
+            const total = contentLength ? parseInt(contentLength) : 26 * 1024 * 1024;
+            
+            const reader = response.body.getReader();
+            let received = 0;
+            const chunks = [];
+            
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                chunks.push(value);
+                received += value.length;
+                
+                const pct = 25 + (received / total) * 50;
+                setProgress(Math.min(pct, 75));
+                
+                const mbLoaded = (received / 1024 / 1024).toFixed(1);
+                const mbTotal = (total / 1024 / 1024).toFixed(1);
+                setStep('step-so', 'active', 
+                    `⏳ Downloading libscorpio.so (${mbLoaded} / ${mbTotal} MB)...`);
+            }
+            
+            // Combine chunks
+            soBuffer = new Uint8Array(received);
+            let offset = 0;
+            for (const chunk of chunks) {
+                soBuffer.set(chunk, offset);
+                offset += chunk.length;
+            }
+            
+            const elapsed = performance.now() - startTime;
+            const fromCache = elapsed < 2000 && received > 1000000;
+            
+            if (fromCache) {
+                cacheBadge.classList.add('visible');
+                setStep('step-so', 'done', 
+                    `✅ libscorpio.so loaded from cache (${(elapsed).toFixed(0)}ms)`);
+            } else {
+                setStep('step-so', 'done', 
+                    `✅ libscorpio.so downloaded (${(elapsed/1000).toFixed(1)}s)`);
+            }
+        } catch(e) {
+            setStep('step-so', 'done', '❌ Failed to load libscorpio.so: ' + e.message);
+            return;
+        }
+        setProgress(75);
+        
+        // Step 4: Parse ELF
+        setStep('step-elf', 'active', '⏳ Parsing ELF binary (symbols, relocations)...');
+        
+        // Store the buffer globally for the engine
+        window._scorpioSOBuffer = soBuffer;
+        
+        setStep('step-elf', 'done', '✅ ELF binary ready (' + (soBuffer.length / 1024 / 1024).toFixed(1) + ' MB)');
+        setProgress(90);
+        
+        // Step 5: Engine ready
+        setStep('step-init', 'active', '⏳ Preparing Scorpio engine...');
+        
+        // Enable buttons
+        document.getElementById('btn-init').disabled = false;
+        
+        setStep('step-init', 'done', '✅ Engine ready — click "Initialize Engine"');
+        setProgress(100);
+        
+        // Fade out after a moment
+        setTimeout(() => {
+            overlay.classList.add('hidden');
+            setTimeout(() => overlay.style.display = 'none', 500);
+        }, 1200);
+    }
+    
+    // Start boot sequence when page is ready
+    if (document.readyState === 'complete') {
+        boot();
+    } else {
+        window.addEventListener('load', boot);
+    }
+})();
+</script>
+
+
+    <script>
+    // Force unregister old service workers and clear caches on first load
+    if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.getRegistrations().then(regs => {
+            regs.forEach(reg => {
+                reg.unregister().then(() => console.log('[BOOT] Unregistered old SW'));
+            });
+        });
+        caches.keys().then(keys => {
+            keys.forEach(key => {
+                if (key !== 'tsto-scorpio-v3') {
+                    caches.delete(key).then(() => console.log('[BOOT] Deleted cache:', key));
+                }
+            });
+        });
+    }
+    </script>
+
+<div style="position:fixed;bottom:10px;right:10px;z-index:99999;display:flex;gap:8px;">
+    <button id="downloadLogs" onclick="(function(){
+        try {
+            var text = window._capturedLogs.map(function(e){return e.t+' ['+e.level+'] '+e.msg;}).join('\n');
+            var a = document.createElement('a');
+            try {
+                var blob = new Blob([text],{type:'text/plain'});
+                a.href = (window.URL || window.webkitURL).createObjectURL(blob);
+            } catch(e) {
+                a.href = 'data:text/plain;charset=utf-8,' + encodeURIComponent(text);
+            }
+            a.download='tsto-logs-'+new Date().toISOString().replace(/:/g,'-')+'.txt';
+            document.body.appendChild(a);
+            a.click();
+            setTimeout(function(){document.body.removeChild(a);},100);
+        } catch(err) { alert('Download failed: ' + err.message); }
+    })()" style="padding:8px 16px;background:#4CAF50;color:white;border:none;border-radius:4px;cursor:pointer;font-size:14px;">
+        📥 Download Logs
+    </button>
+    <button id="downloadTrace" onclick="(function(){
+        try {
+            if(!window._armTrace){alert('No trace yet');return;}
+            var a = document.createElement('a');
+            try {
+                var blob = new Blob([window._armTrace],{type:'text/plain'});
+                a.href = (window.URL || window.webkitURL).createObjectURL(blob);
+            } catch(e) {
+                a.href = 'data:text/plain;charset=utf-8,' + encodeURIComponent(window._armTrace);
+            }
+            a.download='arm-trace-'+new Date().toISOString().replace(/:/g,'-')+'.txt';
+            document.body.appendChild(a);
+            a.click();
+            setTimeout(function(){document.body.removeChild(a);},100);
+        } catch(err) { alert('Download failed: ' + err.message); }
+    })()" style="padding:8px 16px;background:#FF5722;color:white;border:none;border-radius:4px;cursor:pointer;font-size:14px;">
+        🔍 Download Trace
+    </button>
+</div>
+
+</body>
+</html>

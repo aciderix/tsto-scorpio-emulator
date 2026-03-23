@@ -1,0 +1,17 @@
+{
+  "name": "tsto-scorpio-emulator",
+  "version": "15.5.0",
+  "description": "TSTO Scorpio Engine — ARM emulator in the browser via Unicorn.js + WebGL",
+  "private": true,
+  "scripts": {
+    "deploy": "python3 scripts/deploy.py",
+    "test": "node scripts/cli.js test --verbose",
+    "logs": "node scripts/cli.js logs --limit 200",
+    "fopen": "node scripts/cli.js fopen-misses",
+    "screenshot": "node scripts/cli.js screenshot",
+    "serve": "npx serve site -l 8080"
+  },
+  "dependencies": {
+    "puppeteer": "^22.0.0"
+  }
+}
