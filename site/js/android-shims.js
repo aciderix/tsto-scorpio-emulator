@@ -117,6 +117,180 @@ const AndroidShims = {
         return new Uint32Array(buf)[0];
     },
 
+    /**
+     * Read a 32-bit unsigned value from emulator memory
+     */
+    _readU32(emu, addr) {
+        try {
+            var bytes = emu.mem_read(addr, 4);
+            return (bytes[0] | (bytes[1] << 8) | (bytes[2] << 16) | (bytes[3] << 24)) >>> 0;
+        } catch(e) { return 0; }
+    },
+
+    /**
+     * Read stack arguments beyond R0-R3 (ARM calling convention)
+     * index=0 → [SP+0], index=1 → [SP+4], etc.
+     */
+    _readStackArgs(emu, count) {
+        var sp = 0;
+        try {
+            var spBytes = emu.reg_read(13, 4); // ARM_REG_SP = 13
+            sp = (spBytes[0] | (spBytes[1] << 8) | (spBytes[2] << 16) | (spBytes[3] << 24)) >>> 0;
+        } catch(e) { return []; }
+        var result = [];
+        for (var i = 0; i < count; i++) {
+            result.push(this._readU32(emu, sp + i * 4));
+        }
+        return result;
+    },
+
+    /**
+     * Process a printf-style format string with arguments.
+     * fmtStr: the format string
+     * getArg: function(index) that returns the next argument value (uint32)
+     * emu: emulator instance for reading strings from memory
+     */
+    _formatString(emu, fmtStr, getArg) {
+        var result = '';
+        var argIdx = 0;
+        var i = 0;
+        while (i < fmtStr.length) {
+            if (fmtStr[i] !== '%') {
+                result += fmtStr[i];
+                i++;
+                continue;
+            }
+            i++; // skip %
+            if (i >= fmtStr.length) break;
+
+            // Parse flags
+            var flags = '';
+            while (i < fmtStr.length && '-+ #0'.indexOf(fmtStr[i]) >= 0) {
+                flags += fmtStr[i];
+                i++;
+            }
+            // Parse width
+            var width = '';
+            if (fmtStr[i] === '*') {
+                width = getArg(argIdx++) >>> 0;
+                i++;
+            } else {
+                while (i < fmtStr.length && fmtStr[i] >= '0' && fmtStr[i] <= '9') {
+                    width += fmtStr[i];
+                    i++;
+                }
+            }
+            // Parse precision
+            var precision = -1;
+            if (i < fmtStr.length && fmtStr[i] === '.') {
+                i++;
+                var precStr = '';
+                if (fmtStr[i] === '*') {
+                    precision = getArg(argIdx++) >>> 0;
+                    i++;
+                } else {
+                    while (i < fmtStr.length && fmtStr[i] >= '0' && fmtStr[i] <= '9') {
+                        precStr += fmtStr[i];
+                        i++;
+                    }
+                    precision = precStr ? parseInt(precStr) : 0;
+                }
+            }
+            // Parse length modifier
+            var lengthMod = '';
+            if (i < fmtStr.length && (fmtStr[i] === 'l' || fmtStr[i] === 'h' || fmtStr[i] === 'z' || fmtStr[i] === 'j' || fmtStr[i] === 't')) {
+                lengthMod += fmtStr[i];
+                i++;
+                if (i < fmtStr.length && (fmtStr[i] === 'l' || fmtStr[i] === 'h')) {
+                    lengthMod += fmtStr[i];
+                    i++;
+                }
+            }
+            if (i >= fmtStr.length) break;
+
+            var spec = fmtStr[i];
+            i++;
+            var val;
+            switch (spec) {
+                case '%':
+                    result += '%';
+                    break;
+                case 's':
+                    val = getArg(argIdx++);
+                    if (val) {
+                        result += this._readCString(emu, val);
+                    } else {
+                        result += '(null)';
+                    }
+                    break;
+                case 'd': case 'i':
+                    val = getArg(argIdx++);
+                    // Treat as signed 32-bit
+                    val = val | 0;
+                    result += val.toString();
+                    break;
+                case 'u':
+                    val = getArg(argIdx++);
+                    result += (val >>> 0).toString();
+                    break;
+                case 'x':
+                    val = getArg(argIdx++);
+                    result += (val >>> 0).toString(16);
+                    break;
+                case 'X':
+                    val = getArg(argIdx++);
+                    result += (val >>> 0).toString(16).toUpperCase();
+                    break;
+                case 'p':
+                    val = getArg(argIdx++);
+                    result += '0x' + (val >>> 0).toString(16);
+                    break;
+                case 'c':
+                    val = getArg(argIdx++);
+                    result += String.fromCharCode(val & 0xFF);
+                    break;
+                case 'f': case 'F':
+                    val = getArg(argIdx++);
+                    var f = this._bitsToFloat(val);
+                    result += (precision >= 0) ? f.toFixed(precision) : f.toFixed(6);
+                    break;
+                case 'e': case 'E':
+                    val = getArg(argIdx++);
+                    var fv = this._bitsToFloat(val);
+                    result += (precision >= 0) ? fv.toExponential(precision) : fv.toExponential(6);
+                    break;
+                case 'g': case 'G':
+                    val = getArg(argIdx++);
+                    result += this._bitsToFloat(val).toString();
+                    break;
+                case 'n':
+                    // %n - store number of chars written (skip the arg)
+                    argIdx++;
+                    break;
+                default:
+                    // Unknown specifier — output literal
+                    result += '%' + spec;
+                    argIdx++; // consume an arg to stay in sync
+                    break;
+            }
+        }
+        return result;
+    },
+
+    /**
+     * Write a string to emulator memory at dst, return length written
+     */
+    _writeStringToMem(emu, dst, str, maxLen) {
+        if (!dst) return 0;
+        var s = (maxLen !== undefined && maxLen > 0) ? str.substring(0, maxLen - 1) : str;
+        try {
+            var bytes = [];
+            for (var i = 0; i < s.length; i++) bytes.push(s.charCodeAt(i) & 0xFF);
+            bytes.push(0);
+            emu.mem_write(dst, bytes);
+        } catch(e) {}
+        return s.length;
+    },
 
     /**
      * Get data symbols that need memory allocation (not function stubs)
@@ -554,32 +728,53 @@ const AndroidShims = {
             },
             'fprintf':  function(emu, args) { return 0; },
             'sprintf':  function(emu, args) {
+                // sprintf(dst, fmt, ...) → R0=dst, R1=fmt, R2=arg1, R3=arg2, stack for arg3+
                 var dst = args[0], fmt = self._readCString(emu, args[1]);
-                if (dst && fmt) {
-                    try {
-                        var bytes = [];
-                        for (var i = 0; i < fmt.length; i++) bytes.push(fmt.charCodeAt(i) & 0xFF);
-                        bytes.push(0);
-                        emu.mem_write(dst, bytes);
-                    } catch(e) {}
-                }
-                return fmt.length;
+                if (!fmt) return 0;
+                var regArgs = [args[2], args[3]]; // R2, R3
+                var stackArgs = self._readStackArgs(emu, 8);
+                var allArgs = regArgs.concat(stackArgs);
+                var result = self._formatString(emu, fmt, function(idx) { return allArgs[idx] || 0; });
+                self._writeStringToMem(emu, dst, result);
+                return result.length;
             },
             'snprintf': function(emu, args) {
+                // snprintf(dst, n, fmt, ...) → R0=dst, R1=n, R2=fmt, R3=arg1, stack for arg2+
                 var dst = args[0], n = args[1], fmt = self._readCString(emu, args[2]);
-                if (dst && fmt && n > 0) {
-                    try {
-                        var str = fmt.substring(0, n - 1);
-                        var bytes = [];
-                        for (var i = 0; i < str.length; i++) bytes.push(str.charCodeAt(i) & 0xFF);
-                        bytes.push(0);
-                        emu.mem_write(dst, bytes);
-                    } catch(e) {}
-                }
-                return Math.min(fmt.length, n - 1);
+                if (!fmt || !n) return 0;
+                var regArgs = [args[3]]; // R3
+                var stackArgs = self._readStackArgs(emu, 8);
+                var allArgs = regArgs.concat(stackArgs);
+                var result = self._formatString(emu, fmt, function(idx) { return allArgs[idx] || 0; });
+                self._writeStringToMem(emu, dst, result, n);
+                return result.length;
             },
-            'vsnprintf':     function(emu, args) { return 0; },
-            '__vsnprintf_chk': function(emu, args) { return 0; },
+            'vsnprintf': function(emu, args) {
+                // vsnprintf(dst, n, fmt, va_list) → R0=dst, R1=n, R2=fmt, R3=va_list ptr
+                var dst = args[0], n = args[1], fmt = self._readCString(emu, args[2]);
+                var vaPtr = args[3];
+                if (!fmt || !n) return 0;
+                var result = self._formatString(emu, fmt, function(idx) {
+                    return self._readU32(emu, vaPtr + idx * 4);
+                });
+                self._writeStringToMem(emu, dst, result, n);
+                return result.length;
+            },
+            '__vsnprintf_chk': function(emu, args) {
+                // __vsnprintf_chk(dst, maxlen, flag, real_maxlen, fmt_on_stack, va_list_on_stack)
+                // R0=dst, R1=maxlen, R2=flag, R3=real_maxlen
+                // fmt at [SP+0], va_list at [SP+4]
+                var dst = args[0], n = args[1];
+                var stackArgs = self._readStackArgs(emu, 2);
+                var fmt = self._readCString(emu, stackArgs[0]);
+                var vaPtr = stackArgs[1];
+                if (!fmt || !n) return 0;
+                var result = self._formatString(emu, fmt, function(idx) {
+                    return self._readU32(emu, vaPtr + idx * 4);
+                });
+                self._writeStringToMem(emu, dst, result, n);
+                return result.length;
+            },
 
             // ============================================
             // FILE I/O — v2.1: VFS-backed implementations
@@ -1142,24 +1337,27 @@ const AndroidShims = {
                 return dst;
             },
             '__sprintf_chk': function(emu, args) {
-                // __sprintf_chk(dst, flag, dst_size, fmt, ...)
-                var dst = args[0], fmt = self._readCString(emu, args[3] || args[2]);
-                if (dst && fmt) {
-                    try {
-                        var bytes = [];
-                        for (var i = 0; i < fmt.length; i++) bytes.push(fmt.charCodeAt(i) & 0xFF);
-                        bytes.push(0);
-                        emu.mem_write(dst, bytes);
-                    } catch(e) {}
-                }
-                return fmt ? fmt.length : 0;
+                // __sprintf_chk(dst, flag, dst_size, fmt, ...) → R0=dst, R1=flag, R2=dst_size, R3=fmt
+                // format args start on stack
+                var dst = args[0], fmt = self._readCString(emu, args[3]);
+                if (!fmt) return 0;
+                var stackArgs = self._readStackArgs(emu, 8);
+                var result = self._formatString(emu, fmt, function(idx) { return stackArgs[idx] || 0; });
+                self._writeStringToMem(emu, dst, result);
+                return result.length;
             },
             '__snprintf_chk': function(emu, args) {
                 // __snprintf_chk(dst, maxlen, flag, dst_size, fmt, ...)
+                // R0=dst, R1=maxlen, R2=flag, R3=dst_size
+                // fmt at [SP+0], format args at [SP+4]+
                 var dst = args[0], n = args[1];
-                // fmt is at args[4] but ARM only passes 4 regs — need stack for 5th arg
-                // Simplified: just return 0 for now
-                return 0;
+                var stackArgs = self._readStackArgs(emu, 10);
+                var fmt = self._readCString(emu, stackArgs[0]);
+                if (!fmt || !n) return 0;
+                var fmtArgs = stackArgs.slice(1);
+                var result = self._formatString(emu, fmt, function(idx) { return fmtArgs[idx] || 0; });
+                self._writeStringToMem(emu, dst, result, n);
+                return result.length;
             },
 
             // ============================================
@@ -1203,27 +1401,45 @@ const AndroidShims = {
                 return 0;
             },
             'asprintf': function(emu, args) {
-                // asprintf(char **strp, const char *fmt, ...) — allocate + sprintf
+                // asprintf(char **strp, const char *fmt, ...) → R0=strp, R1=fmt, R2=arg1, R3=arg2
                 var fmt = self._readCString(emu, args[1]);
-                if (args[0] && fmt) {
-                    var ptr = self.malloc(fmt.length + 64);
-                    if (ptr) {
-                        try {
-                            var bytes = [];
-                            for (var i = 0; i < fmt.length; i++) bytes.push(fmt.charCodeAt(i) & 0xFF);
-                            bytes.push(0);
-                            emu.mem_write(ptr, bytes);
-                            // Write pointer to *strp
-                            emu.mem_write(args[0], [
-                                ptr & 0xFF, (ptr >> 8) & 0xFF,
-                                (ptr >> 16) & 0xFF, (ptr >> 24) & 0xFF
-                            ]);
-                        } catch(e) {}
-                    }
+                if (!args[0] || !fmt) return -1;
+                var regArgs = [args[2], args[3]];
+                var stackArgs = self._readStackArgs(emu, 8);
+                var allArgs = regArgs.concat(stackArgs);
+                var result = self._formatString(emu, fmt, function(idx) { return allArgs[idx] || 0; });
+                var ptr = self.malloc(result.length + 1);
+                if (ptr) {
+                    self._writeStringToMem(emu, ptr, result);
+                    try {
+                        emu.mem_write(args[0], [
+                            ptr & 0xFF, (ptr >> 8) & 0xFF,
+                            (ptr >> 16) & 0xFF, (ptr >> 24) & 0xFF
+                        ]);
+                    } catch(e) {}
                 }
-                return fmt ? fmt.length : -1;
+                return result.length;
             },
-            'vasprintf': function(emu, args) { return -1; },
+            'vasprintf': function(emu, args) {
+                // vasprintf(char **strp, const char *fmt, va_list ap) → R0=strp, R1=fmt, R2=va_list
+                var fmt = self._readCString(emu, args[1]);
+                var vaPtr = args[2];
+                if (!args[0] || !fmt) return -1;
+                var result = self._formatString(emu, fmt, function(idx) {
+                    return self._readU32(emu, vaPtr + idx * 4);
+                });
+                var ptr = self.malloc(result.length + 1);
+                if (ptr) {
+                    self._writeStringToMem(emu, ptr, result);
+                    try {
+                        emu.mem_write(args[0], [
+                            ptr & 0xFF, (ptr >> 8) & 0xFF,
+                            (ptr >> 16) & 0xFF, (ptr >> 24) & 0xFF
+                        ]);
+                    } catch(e) {}
+                }
+                return result.length;
+            },
             'remove': function(emu, args) {
                 var path = self._readCString(emu, args[0]);
                 Logger.info('[remove] ' + path + ' (no-op)');
