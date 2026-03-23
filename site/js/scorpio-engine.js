@@ -37,7 +37,7 @@ class ScorpioEngine {
 
         // v15: Render path control
         this.useFullRender = false;       // false=simple(glClear only), true=full RenderScene
-        this.maxFrameInsns = 2000000;     // instruction limit for game frames (2M default)
+        this.maxFrameInsns = 10000000;    // instruction limit for game frames (10M — was 2M, increased to let render complete)
 
         // v15.2: Virtual File System
         this.vfs = null;
@@ -53,6 +53,11 @@ class ScorpioEngine {
         this._traceMaxInsns = 500;  // capture first 500 instructions
         this._traceInsnsCount = 0;
         this._genericReturnCalls = new Map();
+
+        // Render-phase diagnostics: track function calls during first few frames
+        this._frameCallProfile = null; // Map of function name → count (active during profiled frames)
+        this._frameProfileCount = 0;   // Number of frames profiled so far
+        this._maxProfileFrames = 3;    // Profile first 3 frames
     }
 
     /**
@@ -397,6 +402,11 @@ class ScorpioEngine {
                     var r1 = self._readReg(uc.ARM_REG_R1);
                     var r2 = self._readReg(uc.ARM_REG_R2);
                     var r3 = self._readReg(uc.ARM_REG_R3);
+                    // Profile: count function calls during render frames
+                    if (self._frameCallProfile) {
+                        var n = handler.name;
+                        self._frameCallProfile.set(n, (self._frameCallProfile.get(n) || 0) + 1);
+                    }
                     var result = handler.handler(self.emu, [r0, r1, r2, r3]);
                     if (result !== undefined && result !== null) {
                         self._writeReg(uc.ARM_REG_R0, result >>> 0);
@@ -729,8 +739,34 @@ class ScorpioEngine {
             // by instruction budget only, not by this flag.
             this.emu.mem_write(this.BASE + 0x1A466A8, [0]);
         }
+        // Start function profiling for first few frames
+        if (this._frameProfileCount < this._maxProfileFrames) {
+            this._frameCallProfile = new Map();
+        }
+
         var frameResult = this.callFunction('Java_com_bight_android_jni_BGCoreJNIBridge_OGLESRender',
             this.jni.prepareCall('OGLESRender'));
+
+        // Dump function profile for this frame
+        if (this._frameCallProfile && this._frameProfileCount < this._maxProfileFrames) {
+            this._frameProfileCount++;
+            var profile = this._frameCallProfile;
+            this._frameCallProfile = null;
+            // Sort by count descending
+            var entries = [];
+            profile.forEach(function(count, name) { entries.push({name: name, count: count}); });
+            entries.sort(function(a, b) { return b.count - a.count; });
+            Logger.info('=== Frame ' + this._frameProfileCount + ' function profile (top 30) ===');
+            for (var i = 0; i < Math.min(30, entries.length); i++) {
+                Logger.info('  ' + entries[i].count + 'x ' + entries[i].name);
+            }
+            Logger.info('  Total unique functions: ' + entries.length);
+            // Also log VFS stats
+            if (this.vfs) {
+                var vs = this.vfs.getStats();
+                Logger.info('  VFS: ' + vs.opens + ' opens, ' + vs.reads + ' reads, ' + (vs.bytesRead/1024).toFixed(1) + 'KB read, ' + vs.misses + ' misses');
+            }
+        }
         
         // Dump ARM trace if captured
         if (this._traceLog.length > 0) {
