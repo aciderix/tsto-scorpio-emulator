@@ -521,7 +521,11 @@ class ScorpioEngine {
 
     _readReg(reg) {
         var bytes = this.emu.reg_read(reg, 4);
-        return bytes[0] | (bytes[1] << 8) | (bytes[2] << 16) | (bytes[3] << 24);
+        // Use >>> 0 to ensure unsigned 32-bit result.
+        // Without this, values >= 0x80000000 become negative due to JS signed shifts,
+        // causing Map lookups to fail (e.g. method ID 0xD0020210 stored as positive
+        // but read back as negative).
+        return (bytes[0] | (bytes[1] << 8) | (bytes[2] << 16) | (bytes[3] << 24)) >>> 0;
     }
 
     _writeReg(reg, val) {

@@ -927,17 +927,21 @@ class JNIBridge {
             if (nameLower === 'getsharedpreference' || nameLower === 'getsharedpreferences' ||
                 nameLower.indexOf('sharedpreference') >= 0 ||
                 nameLower === 'getstring') {
-                // args[3] = R3 = Java string handle for the preference key
-                // For CallObjectMethodV, R3 is a va_list pointer — try reading from it
+                // For CallStaticObjectMethod: args = [env, clazz, mid, arg0]
+                // arg0 (R3) = the jstring key handle
                 var keyHandle = args[3];
                 var key = this._strings.get(keyHandle) || '';
-                // If key is empty and keyHandle looks like a pointer (not a string ID),
-                // try reading it as a va_list
-                if (!key && keyHandle && (keyHandle & 0xF0000000) !== 0xD0000000) {
+                // R3 is often a va_list pointer (stack address) when called via
+                // CallStaticObjectMethodV — read the actual jstring handle from it
+                if (!key && keyHandle) {
                     try {
                         var vaBytes = emu.mem_read(keyHandle, 4);
-                        var realHandle = vaBytes[0] | (vaBytes[1] << 8) | (vaBytes[2] << 16) | (vaBytes[3] << 24);
+                        var realHandle = (vaBytes[0] | (vaBytes[1] << 8) | (vaBytes[2] << 16) | (vaBytes[3] << 24)) >>> 0;
                         key = this._strings.get(realHandle) || '';
+                        if (!key) {
+                            // Maybe the string is written directly in ARM memory at that address
+                            key = this._readCString(emu, realHandle);
+                        }
                     } catch(e) {}
                 }
                 var value = this._sharedPreferences[key];
