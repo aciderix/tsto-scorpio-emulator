@@ -3,355 +3,336 @@
  * TSTO Emulator CLI Controller
  * 
  * Pilots the web emulator via headless Chrome (Puppeteer).
- * Designed for Claude Code or any terminal-only environment.
+ * All logs come from Puppeteer console capture + DOM scraping.
  * 
  * Usage:
  *   node scripts/cli.js test              # Full test: init → start → wait → dump logs
- *   node scripts/cli.js init              # Just initialize the engine
- *   node scripts/cli.js start             # Init + start game loop
  *   node scripts/cli.js logs              # Init + start + dump all logs
- *   node scripts/cli.js logs --wait=30    # Wait 30s before dumping logs
- *   node scripts/cli.js screenshot        # Take a screenshot of the canvas
- *   node scripts/cli.js fopen-misses      # Show only fopen MISS entries
+ *   node scripts/cli.js logs --wait=30    # Wait 30s before dumping
+ *   node scripts/cli.js screenshot        # Take a screenshot
+ *   node scripts/cli.js fopen-misses      # Show fopen MISS entries
  *   node scripts/cli.js dlc-status        # Show DLC loader status
- *   node scripts/cli.js vfs-stats         # Show VFS statistics
- *   node scripts/cli.js eval "JS_CODE"    # Evaluate arbitrary JS in page context
+ *   node scripts/cli.js eval "JS_CODE"    # Evaluate arbitrary JS in page
  * 
  * Options:
- *   --url=URL          Override site URL (default: https://tsto-scorpio-emulator.netlify.app)
- *   --wait=SECONDS     Wait time after start before collecting (default: 15)
- *   --output=FILE      Save output to file instead of stdout
- *   --screenshot=FILE  Save screenshot to file (default: screenshot.png)
- *   --no-headless      Show the browser window (for debugging)
- *   --verbose          Show progress messages on stderr
+ *   --url=URL          Override site URL
+ *   --wait=SECONDS     Wait time after start (default: 20)
+ *   --output=FILE      Save output to file
+ *   --screenshot=FILE  Screenshot filename (default: screenshot.png)
+ *   --no-headless      Show browser window
+ *   --verbose          Progress messages on stderr
  * 
- * Prerequisites:
- *   npm install puppeteer
+ * Environment:
+ *   PUPPETEER_EXECUTABLE_PATH    Override Chrome/Chromium path
  */
 
 const puppeteer = require('puppeteer');
 const fs = require('fs');
 const path = require('path');
 
-// Parse arguments
+// ── Parse args ──────────────────────────────────────────
 const args = process.argv.slice(2);
 const command = args.find(a => !a.startsWith('--')) || 'test';
 const opts = {};
 args.filter(a => a.startsWith('--')).forEach(a => {
-    const [k, v] = a.slice(2).split('=');
-    opts[k] = v === undefined ? true : v;
+    const eq = a.indexOf('=');
+    if (eq > -1) opts[a.slice(2, eq)] = a.slice(eq + 1);
+    else opts[a.slice(2)] = true;
 });
 
 const SITE_URL = opts.url || 'https://tsto-scorpio-emulator.netlify.app';
-const WAIT_SECONDS = parseInt(opts.wait || '15', 10);
+const WAIT_SECONDS = parseInt(opts.wait || '20', 10);
 const HEADLESS = !opts['no-headless'];
 const VERBOSE = !!opts.verbose;
 const OUTPUT_FILE = opts.output || null;
 const SCREENSHOT_FILE = opts.screenshot || 'screenshot.png';
 
+// ── Helpers ─────────────────────────────────────────────
 function log(...msg) {
     if (VERBOSE) process.stderr.write('[cli] ' + msg.join(' ') + '\n');
 }
-
 function output(text) {
     if (OUTPUT_FILE) {
         fs.writeFileSync(OUTPUT_FILE, text, 'utf-8');
-        log(`Output written to ${OUTPUT_FILE}`);
+        log(`Output saved to ${OUTPUT_FILE}`);
     } else {
         process.stdout.write(text);
     }
 }
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-async function sleep(ms) {
-    return new Promise(r => setTimeout(r, ms));
+// ── Console log accumulator ─────────────────────────────
+// All logs come from Puppeteer's console listener — NOT window._capturedLogs
+let consoleLogs = [];
+
+function logsContain(pattern) {
+    return consoleLogs.some(e => e.text.includes(pattern));
+}
+function logsFind(pattern) {
+    return consoleLogs.filter(e => e.text.includes(pattern));
 }
 
+// ── Browser ─────────────────────────────────────────────
 async function launchBrowser() {
     log('Launching browser...');
-    const browser = await puppeteer.launch({
+    const launchOpts = {
         headless: HEADLESS ? 'new' : false,
         args: [
             '--no-sandbox',
             '--disable-setuid-sandbox',
-            '--disable-web-security',        // Avoid CORS issues
-            '--disable-features=VizDisplayCompositor',
-            '--use-gl=swiftshader',          // Software WebGL
+            '--disable-web-security',
+            '--use-gl=swiftshader',
             '--enable-webgl',
         ]
-    });
+    };
+    if (process.env.PUPPETEER_EXECUTABLE_PATH) {
+        launchOpts.executablePath = process.env.PUPPETEER_EXECUTABLE_PATH;
+    }
+    const browser = await puppeteer.launch(launchOpts);
     const page = await browser.newPage();
-    
-    // Capture console messages
-    const consoleLogs = [];
+    await page.setViewport({ width: 1280, height: 900 });
+
+    // Capture ALL console output
     page.on('console', msg => {
-        const entry = {
+        consoleLogs.push({
             time: new Date().toISOString(),
-            level: msg.type().toUpperCase(),
+            type: msg.type().toUpperCase(),
             text: msg.text()
-        };
-        consoleLogs.push(entry);
-        if (VERBOSE && entry.level === 'ERR') {
-            process.stderr.write(`  [console.${entry.level}] ${entry.text}\n`);
-        }
+        });
     });
-    
-    // Capture page errors
     page.on('pageerror', err => {
         consoleLogs.push({
             time: new Date().toISOString(),
-            level: 'PAGEERROR',
+            type: 'PAGEERROR',
             text: err.message
         });
     });
-    
-    return { browser, page, consoleLogs };
+
+    return { browser, page };
 }
 
-async function navigateToSite(page) {
+// ── Wait for condition in console logs ──────────────────
+async function waitForLog(pattern, timeoutMs = 30000) {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+        if (logsContain(pattern)) return true;
+        await sleep(500);
+    }
+    return false;
+}
+
+// ── Navigate & wait for WASM ready ──────────────────────
+async function navigateAndWaitReady(page) {
     log(`Navigating to ${SITE_URL}...`);
     await page.goto(SITE_URL, { waitUntil: 'networkidle2', timeout: 60000 });
     log('Page loaded');
+
+    // Wait for Unicorn WASM + libscorpio.so to be loaded
+    log('Waiting for WASM + ELF to load...');
+    const ready = await waitForLog('ELF binary ready', 30000) ||
+                  await waitForLog('Engine ready', 10000);
     
-    // Wait for the init button to be ready
-    await page.waitForSelector('#initBtn, button', { timeout: 10000 }).catch(() => {});
-    await sleep(1000);
+    if (logsContain('ELF binary ready')) {
+        log('✅ ELF binary ready');
+    } else {
+        // Check what we got
+        const lastLogs = consoleLogs.slice(-5).map(e => e.text).join(' | ');
+        log(`⚠️ ELF not confirmed ready. Last logs: ${lastLogs}`);
+    }
+    
+    await sleep(1000); // Extra settle time
 }
 
+// ── Click Initialize Engine ─────────────────────────────
 async function clickInit(page) {
-    log('Clicking Initialize Engine...');
+    log('Clicking "Initialize Engine"...');
     
-    // Find and click the init button
     const clicked = await page.evaluate(() => {
-        // Try by ID first
         let btn = document.getElementById('initBtn');
         if (!btn) {
-            // Search by text content
-            const buttons = Array.from(document.querySelectorAll('button'));
-            btn = buttons.find(b => b.textContent.includes('Init'));
+            btn = Array.from(document.querySelectorAll('button'))
+                .find(b => b.textContent.includes('Init'));
         }
-        if (btn) {
-            btn.click();
-            return btn.textContent.trim();
-        }
+        if (btn && !btn.disabled) { btn.click(); return btn.textContent.trim(); }
         return null;
     });
     
-    if (!clicked) {
-        throw new Error('Could not find Init button');
-    }
+    if (!clicked) throw new Error('Init button not found or disabled');
     log(`Clicked: "${clicked}"`);
     
-    // Wait for initialization to complete
-    log('Waiting for engine initialization...');
-    await sleep(5000);  // Init takes ~3-5 seconds
+    // Wait for engine initialization (look for JNI functions or relocations)
+    log('Waiting for engine init...');
+    const initialized = await waitForLog('JNI Functions', 30000) ||
+                        await waitForLog('Relocations', 30000);
     
-    // Check if engine is initialized
-    const status = await page.evaluate(() => {
-        const logs = window._capturedLogs || [];
-        const initLog = logs.find(l => l.msg && l.msg.includes('Engine Initialized'));
-        const errorLog = logs.find(l => l.msg && l.msg.includes('FATAL'));
-        return {
-            initialized: !!initLog,
-            error: errorLog ? errorLog.msg : null,
-            logCount: logs.length
-        };
-    });
-    
-    if (status.error) {
-        throw new Error(`Engine init failed: ${status.error}`);
+    if (logsContain('JNI Functions')) {
+        const jniLog = logsFind('JNI Functions')[0];
+        log(`✅ ${jniLog.text.substring(0, 80)}`);
+    } else if (logsContain('FATAL')) {
+        const fatal = logsFind('FATAL')[0];
+        throw new Error(`Init failed: ${fatal.text}`);
+    } else {
+        log('⚠️ Init completion unclear — continuing anyway');
     }
     
-    log(status.initialized ? '✅ Engine initialized' : '⚠️ Init status unclear');
-    return status;
+    // Extra wait for post-init setup (DLC loader etc.)
+    await sleep(3000);
 }
 
+// ── Click Start Game Loop ───────────────────────────────
 async function clickStart(page) {
-    log('Clicking Start Game Loop...');
+    log('Clicking "Start Game Loop"...');
     
     const clicked = await page.evaluate(() => {
-        const buttons = Array.from(document.querySelectorAll('button'));
-        let btn = buttons.find(b => b.textContent.includes('Start'));
-        if (btn) {
-            btn.click();
-            return btn.textContent.trim();
-        }
+        const btns = Array.from(document.querySelectorAll('button'));
+        const btn = btns.find(b => b.textContent.includes('Start Game'));
+        if (btn && !btn.disabled) { btn.click(); return btn.textContent.trim(); }
+        // Fallback: any button with "Start"
+        const btn2 = btns.find(b => b.textContent.includes('Start'));
+        if (btn2 && !btn2.disabled) { btn2.click(); return btn2.textContent.trim(); }
         return null;
     });
     
-    if (!clicked) {
-        throw new Error('Could not find Start button');
-    }
+    if (!clicked) throw new Error('Start button not found or disabled');
     log(`Clicked: "${clicked}"`);
-    return true;
 }
 
+// ── Wait for frames ─────────────────────────────────────
 async function waitForFrames(page, seconds) {
-    log(`Waiting ${seconds}s for game loop to run...`);
-    await sleep(seconds * 1000);
+    log(`Waiting ${seconds}s for game loop...`);
     
-    const stats = await page.evaluate(() => {
+    // Report progress every 5s
+    const chunks = Math.ceil(seconds / 5);
+    for (let i = 0; i < chunks; i++) {
+        const wait = Math.min(5, seconds - i * 5);
+        await sleep(wait * 1000);
+        log(`  ${(i + 1) * 5}s — ${consoleLogs.length} logs captured`);
+    }
+}
+
+// ── Scrape DOM logs (alternative source) ────────────────
+async function scrapeDomLogs(page) {
+    return page.evaluate(() => {
+        const entries = document.querySelectorAll('.log-info, .log-gl, .log-warn, .log-error, .log-jni, .log-vfs, [class^="log-"]');
+        return Array.from(entries).map(el => el.textContent.trim());
+    });
+}
+
+// ── Get status from page ────────────────────────────────
+async function getPageStatus(page) {
+    return page.evaluate(() => {
         const el = document.getElementById('statusDisplay') || 
                    document.querySelector('.status') ||
                    document.querySelector('[id*="status"]');
-        return {
-            statusText: el ? el.textContent : 'N/A',
-            logCount: (window._capturedLogs || []).length
-        };
-    });
-    
-    log(`Status: ${stats.statusText} | Logs: ${stats.logCount}`);
-    return stats;
-}
-
-async function getLogs(page) {
-    return page.evaluate(() => {
-        return (window._capturedLogs || []).map(e => 
-            e.t + ' [' + e.level + '] ' + e.msg
-        ).join('\n');
+        return el ? el.innerText : 'N/A';
     });
 }
 
-async function getStructuredLogs(page) {
-    return page.evaluate(() => {
-        return JSON.stringify(window._capturedLogs || [], null, 2);
-    });
+// ── Format logs for output ──────────────────────────────
+function formatConsoleLogs(filter = null) {
+    let logs = consoleLogs;
+    if (filter) logs = logs.filter(e => e.text.includes(filter));
+    return logs.map(e => `${e.time} [${e.type}] ${e.text}`).join('\n');
 }
 
-async function getFopenMisses(page) {
-    return page.evaluate(() => {
-        return (window._capturedLogs || [])
-            .filter(e => e.msg && e.msg.includes('fopen') && e.msg.includes('MISS'))
-            .map(e => e.msg)
-            .join('\n');
-    });
-}
-
-async function getDlcStatus(page) {
-    return page.evaluate(() => {
-        const logs = window._capturedLogs || [];
-        const dlcLogs = logs.filter(e => e.msg && (
-            e.msg.includes('DLC') || 
-            e.msg.includes('dlc') ||
-            e.msg.includes('manifest') ||
-            e.msg.includes('fopen')
-        ));
-        
-        // Extract key metrics
-        const result = {
-            dlcLoaderInit: dlcLogs.some(l => l.msg.includes('DLC Loader initialized')),
-            manifestLoaded: null,
-            fopenMisses: [],
-            dlcDownloads: [],
-            errors: []
-        };
-        
-        dlcLogs.forEach(l => {
-            if (l.msg.includes('directories')) {
-                result.manifestLoaded = l.msg;
-            }
-            if (l.msg.includes('fopen') && l.msg.includes('MISS')) {
-                result.fopenMisses.push(l.msg);
-            }
-            if (l.msg.includes('Downloaded') || l.msg.includes('Fetching')) {
-                result.dlcDownloads.push(l.msg);
-            }
-            if (l.level === 'ERR' || l.level === 'WARN') {
-                result.errors.push(l.msg);
-            }
-        });
-        
-        return JSON.stringify(result, null, 2);
-    });
-}
-
-async function getVfsStats(page) {
-    return page.evaluate(() => {
-        const logs = window._capturedLogs || [];
-        const vfsLogs = logs.filter(e => e.msg && (
-            e.msg.includes('VFS') || 
-            e.msg.includes('vfs') ||
-            e.msg.includes('fopen') ||
-            e.msg.includes('fread') ||
-            e.msg.includes('asset')
-        ));
-        return vfsLogs.map(e => e.t + ' ' + e.msg).join('\n');
-    });
-}
-
+// ── Take screenshot ─────────────────────────────────────
 async function takeScreenshot(page, filepath) {
-    log(`Taking screenshot → ${filepath}`);
+    log(`Screenshot → ${filepath}`);
     
-    // Try to screenshot just the canvas
-    const canvasShot = await page.evaluate(() => {
-        const canvas = document.querySelector('canvas');
-        if (canvas) {
-            return canvas.toDataURL('image/png');
-        }
-        return null;
+    // Canvas screenshot
+    const canvasData = await page.evaluate(() => {
+        const c = document.querySelector('canvas');
+        return c ? c.toDataURL('image/png') : null;
     });
-    
-    if (canvasShot) {
-        const data = canvasShot.replace(/^data:image\/png;base64,/, '');
-        fs.writeFileSync(filepath.replace('.png', '-canvas.png'), Buffer.from(data, 'base64'));
-        log('Canvas screenshot saved');
+    if (canvasData) {
+        const buf = Buffer.from(canvasData.replace(/^data:image\/png;base64,/, ''), 'base64');
+        const canvasFile = filepath.replace('.png', '-canvas.png');
+        fs.writeFileSync(canvasFile, buf);
+        log(`Canvas saved: ${canvasFile} (${buf.length} bytes)`);
     }
     
-    // Also take full page screenshot
+    // Full page
     await page.screenshot({ path: filepath, fullPage: true });
-    log('Full page screenshot saved');
+    log(`Full page saved: ${filepath}`);
 }
 
-async function evalInPage(page, code) {
-    return page.evaluate(code);
+// ── Compute summary stats ───────────────────────────────
+function summary() {
+    const total = consoleLogs.length;
+    const errors = consoleLogs.filter(e => e.type === 'ERROR' || e.type === 'PAGEERROR' || (e.type === 'LOG' && e.text.includes('[ERR]'))).length;
+    const fopenMisses = consoleLogs.filter(e => e.text.includes('fopen') && e.text.includes('MISS'));
+    const dlcLogs = consoleLogs.filter(e => e.text.includes('[DLC]'));
+    const glLogs = consoleLogs.filter(e => e.text.includes('[GL]') || e.text.includes('glClear') || e.text.includes('WebGL'));
+    const jniLogs = consoleLogs.filter(e => e.text.includes('[JNI]'));
+    
+    let s = '\n═══════════════════════════════════════\n';
+    s += `  Total logs:     ${total}\n`;
+    s += `  Errors:         ${errors}\n`;
+    s += `  fopen MISS:     ${fopenMisses.length}\n`;
+    s += `  DLC logs:       ${dlcLogs.length}\n`;
+    s += `  JNI logs:       ${jniLogs.length}\n`;
+    s += `  GL logs:        ${glLogs.length}\n`;
+    s += '═══════════════════════════════════════\n';
+    
+    if (fopenMisses.length > 0) {
+        s += '\nfopen MISS paths:\n';
+        fopenMisses.forEach(e => { s += `  ${e.text}\n`; });
+    }
+    
+    return s;
 }
 
-// ============================================
-// MAIN COMMAND DISPATCH
-// ============================================
+// ── Full test flow ──────────────────────────────────────
+async function runTest(page) {
+    await clickInit(page);
+    await clickStart(page);
+    await waitForFrames(page, WAIT_SECONDS);
+    
+    // Grab DOM logs too
+    const domLogs = await scrapeDomLogs(page);
+    const status = await getPageStatus(page);
+    
+    await takeScreenshot(page, SCREENSHOT_FILE);
+    
+    // Output: console logs + DOM logs + summary
+    let out = '=== CONSOLE LOGS ===\n';
+    out += formatConsoleLogs() + '\n\n';
+    
+    if (domLogs.length > 0) {
+        out += '=== DOM LOGS ===\n';
+        out += domLogs.join('\n') + '\n\n';
+    }
+    
+    out += `=== PAGE STATUS ===\n${status}\n`;
+    out += summary();
+    
+    return out;
+}
 
+// ════════════════════════════════════════════════════════
+// MAIN
+// ════════════════════════════════════════════════════════
 async function main() {
-    const { browser, page, consoleLogs } = await launchBrowser();
+    const { browser, page } = await launchBrowser();
     
     try {
-        await navigateToSite(page);
+        await navigateAndWaitReady(page);
         
         switch (command) {
-            case 'test':
+            case 'test': {
+                const result = await runTest(page);
+                output(result);
+                process.stderr.write(summary());
+                break;
+            }
             case 'logs': {
                 await clickInit(page);
                 await clickStart(page);
                 await waitForFrames(page, WAIT_SECONDS);
-                const logs = await getLogs(page);
-                await takeScreenshot(page, SCREENSHOT_FILE);
-                output(logs + '\n');
-                
-                // Summary on stderr
-                const misses = await getFopenMisses(page);
-                const missCount = misses ? misses.split('\n').length : 0;
-                process.stderr.write(`\n=== SUMMARY ===\n`);
-                process.stderr.write(`Total log lines: ${consoleLogs.length}\n`);
-                process.stderr.write(`fopen misses: ${missCount}\n`);
-                process.stderr.write(`Screenshot: ${SCREENSHOT_FILE}\n`);
-                if (misses) process.stderr.write(`\nfopen MISS paths:\n${misses}\n`);
+                output(formatConsoleLogs() + '\n');
+                process.stderr.write(summary());
                 break;
             }
-            
-            case 'init': {
-                const status = await clickInit(page);
-                const logs = await getLogs(page);
-                output(logs + '\n');
-                break;
-            }
-            
-            case 'start': {
-                await clickInit(page);
-                await clickStart(page);
-                await waitForFrames(page, 5);
-                const logs = await getLogs(page);
-                output(logs + '\n');
-                break;
-            }
-            
             case 'screenshot': {
                 await clickInit(page);
                 await clickStart(page);
@@ -360,62 +341,58 @@ async function main() {
                 output(`Screenshots saved: ${SCREENSHOT_FILE}\n`);
                 break;
             }
-            
             case 'fopen-misses': {
                 await clickInit(page);
                 await clickStart(page);
                 await waitForFrames(page, WAIT_SECONDS);
-                const misses = await getFopenMisses(page);
-                output(misses ? misses + '\n' : 'No fopen misses detected\n');
+                const misses = formatConsoleLogs('fopen');
+                output(misses || 'No fopen entries found\n');
+                process.stderr.write(summary());
                 break;
             }
-            
             case 'dlc-status': {
                 await clickInit(page);
                 await clickStart(page);
                 await waitForFrames(page, WAIT_SECONDS);
-                const status = await getDlcStatus(page);
-                output(status + '\n');
+                const dlc = formatConsoleLogs('DLC');
+                output(dlc || 'No DLC log entries found\n');
                 break;
             }
-            
             case 'vfs-stats': {
                 await clickInit(page);
                 await clickStart(page);
                 await waitForFrames(page, WAIT_SECONDS);
-                const stats = await getVfsStats(page);
-                output(stats + '\n');
+                const vfs = formatConsoleLogs('VFS');
+                output(vfs || 'No VFS log entries found\n');
                 break;
             }
-            
             case 'eval': {
                 const code = args.find(a => !a.startsWith('--') && a !== 'eval');
                 if (!code) {
-                    process.stderr.write('Usage: cli.js eval "window._capturedLogs.length"\n');
+                    process.stderr.write('Usage: cli.js eval "document.title"\n');
                     process.exit(1);
                 }
                 await clickInit(page);
-                const result = await evalInPage(page, code);
+                const result = await page.evaluate(code);
                 output(JSON.stringify(result, null, 2) + '\n');
                 break;
             }
-            
             default:
                 process.stderr.write(`Unknown command: ${command}\n`);
-                process.stderr.write('Commands: test, init, start, logs, screenshot, fopen-misses, dlc-status, vfs-stats, eval\n');
+                process.stderr.write('Commands: test, logs, screenshot, fopen-misses, dlc-status, vfs-stats, eval\n');
                 process.exit(1);
         }
-        
     } catch (err) {
-        process.stderr.write(`ERROR: ${err.message}\n`);
-        // Dump whatever logs we have
+        process.stderr.write(`\n❌ ERROR: ${err.message}\n`);
         if (consoleLogs.length > 0) {
-            const logText = consoleLogs.map(e => `${e.time} [${e.level}] ${e.text}`).join('\n');
-            if (OUTPUT_FILE) {
-                fs.writeFileSync(OUTPUT_FILE, logText, 'utf-8');
-            }
-            process.stderr.write(`Captured ${consoleLogs.length} log entries before error\n`);
+            process.stderr.write(`\nCaptured ${consoleLogs.length} logs before failure:\n`);
+            const last10 = consoleLogs.slice(-10).map(e => `  ${e.text}`).join('\n');
+            process.stderr.write(last10 + '\n');
         }
+        // Dump all logs to file on error
+        const errLog = formatConsoleLogs();
+        fs.writeFileSync('error-logs.txt', errLog, 'utf-8');
+        process.stderr.write('Full logs saved to error-logs.txt\n');
         process.exit(1);
     } finally {
         await browser.close();
