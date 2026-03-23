@@ -60,6 +60,19 @@ const AndroidShims = {
     storeString(str) {
         var addr = this._nextStringAddr;
         this._strings.set(addr, str);
+        // Write the actual bytes to Unicorn memory so ARM code can read them
+        if (this.engine && this.engine.emu) {
+            var bytes = [];
+            for (var i = 0; i < str.length; i++) {
+                bytes.push(str.charCodeAt(i) & 0xFF);
+            }
+            bytes.push(0); // null terminator
+            try {
+                this.engine.emu.mem_write(addr, bytes);
+            } catch(e) {
+                Logger.warn('[storeString] Failed to write "' + str.substring(0, 40) + '" at 0x' + addr.toString(16));
+            }
+        }
         this._nextStringAddr += str.length + 16;
         return addr;
     },
@@ -78,6 +91,10 @@ const AndroidShims = {
             for (var i = 0; i < len; i++) arr.push(bytes[i]);
             return String.fromCharCode.apply(null, arr);
         } catch(e) {
+            // Log failures for addresses that look like they should be readable
+            if (addr >= 0x10000000) {
+                Logger.warn('[_readCString] mem_read failed at 0x' + (addr>>>0).toString(16));
+            }
             return '';
         }
     },
@@ -570,13 +587,18 @@ const AndroidShims = {
             'fopen':   function(emu, args) {
                 var path = self._readCString(emu, args[0]);
                 var mode = self._readCString(emu, args[1]);
-                
+
+                // Debug: log the address and result for tracing string bridge issues
+                if (!path) {
+                    Logger.warn('[fopen] EMPTY path from addr 0x' + (args[0]>>>0).toString(16) + ' mode=' + mode);
+                }
+
                 // Try VFS first
                 if (self.vfs) {
                     var fd = self.vfs.fopen(path, mode);
                     if (fd) return fd; // VFS has this file
                 }
-                
+
                 // Not in VFS — log and return NULL
                 Logger.info('[fopen] MISS: ' + path + ' mode=' + mode);
                 return 0;

@@ -447,8 +447,60 @@ class JNIBridge {
                 return 0;
             }},
 
-            220: { name: 'GetStringRegion', handler: function(emu, args) { return 0; } },
-            221: { name: 'GetStringUTFRegion', handler: function(emu, args) { return 0; } },
+            220: { name: 'GetStringRegion', handler: function(emu, args) {
+                // GetStringRegion(env, jstring, start, len, buf) — UTF-16
+                var stringId = args[1];
+                var start = args[2];
+                var len = args[3];
+                var sp = 0;
+                try {
+                    var spReg = emu.reg_read(uc.ARM_REG_SP);
+                    sp = emu.mem_read(spReg, 4);
+                    sp = sp[0] | (sp[1] << 8) | (sp[2] << 16) | (sp[3] << 24);
+                } catch(e) { sp = 0; }
+                var buf = sp;
+                if (!buf) return 0;
+                var str = self._strings.get(stringId) || '';
+                var sub = str.substring(start, start + len);
+                var bytes = [];
+                for (var i = 0; i < sub.length; i++) {
+                    var c = sub.charCodeAt(i);
+                    bytes.push(c & 0xFF, (c >> 8) & 0xFF); // UTF-16LE
+                }
+                try { emu.mem_write(buf, bytes); } catch(e) {}
+                return 0;
+            }},
+            221: { name: 'GetStringUTFRegion', handler: function(emu, args) {
+                // GetStringUTFRegion(env, jstring, start, len, buf)
+                var stringId = args[1];
+                var start = args[2];
+                var len = args[3];
+                // buf is passed on the stack (5th arg) — read from SP+0
+                var sp = 0;
+                try {
+                    var spReg = emu.reg_read(uc.ARM_REG_SP);
+                    sp = emu.mem_read(spReg, 4);
+                    sp = sp[0] | (sp[1] << 8) | (sp[2] << 16) | (sp[3] << 24);
+                } catch(e) { sp = 0; }
+                var buf = sp;
+                if (!buf) {
+                    // Fallback: try using _getOrWriteStringPtr so at least the string is in memory
+                    self._getOrWriteStringPtr(emu, stringId);
+                    return 0;
+                }
+                var str = self._strings.get(stringId) || '';
+                var sub = str.substring(start, start + len);
+                var bytes = [];
+                for (var i = 0; i < sub.length; i++) {
+                    bytes.push(sub.charCodeAt(i) & 0xFF);
+                }
+                bytes.push(0); // null terminator
+                try { emu.mem_write(buf, bytes); } catch(e) {
+                    Logger.warn('GetStringUTFRegion: failed to write to buf 0x' + (buf>>>0).toString(16));
+                }
+                self._logJNI('GetStringUTFRegion', '"' + sub.substring(0, 60) + '" → buf 0x' + (buf>>>0).toString(16));
+                return 0;
+            }},
             222: { name: 'GetPrimitiveArrayCritical', handler: function(emu, args) { return 0; } },
             223: { name: 'ReleasePrimitiveArrayCritical', handler: function(emu, args) { return 0; } },
             224: { name: 'GetStringCritical', handler: function(emu, args) {
@@ -871,10 +923,23 @@ class JNIBridge {
             }
             
             // v15.5: SharedPreferences support
-            if (nameLower === 'getsharedpreference' || nameLower === 'getsharedpreferences' || 
-                nameLower.indexOf('sharedpreference') >= 0) {
-                var keyHandle = args[3]; // R3 = Java string handle for the preference key
+            // Match both getSharedPreferences() and getString() on a SharedPrefs object
+            if (nameLower === 'getsharedpreference' || nameLower === 'getsharedpreferences' ||
+                nameLower.indexOf('sharedpreference') >= 0 ||
+                nameLower === 'getstring') {
+                // args[3] = R3 = Java string handle for the preference key
+                // For CallObjectMethodV, R3 is a va_list pointer — try reading from it
+                var keyHandle = args[3];
                 var key = this._strings.get(keyHandle) || '';
+                // If key is empty and keyHandle looks like a pointer (not a string ID),
+                // try reading it as a va_list
+                if (!key && keyHandle && (keyHandle & 0xF0000000) !== 0xD0000000) {
+                    try {
+                        var vaBytes = emu.mem_read(keyHandle, 4);
+                        var realHandle = vaBytes[0] | (vaBytes[1] << 8) | (vaBytes[2] << 16) | (vaBytes[3] << 24);
+                        key = this._strings.get(realHandle) || '';
+                    } catch(e) {}
+                }
                 var value = this._sharedPreferences[key];
                 if (value === undefined) value = '';
                 this._logJNI('CallMethod→String', 'getSharedPreference("' + key + '") → "' + value + '"');
