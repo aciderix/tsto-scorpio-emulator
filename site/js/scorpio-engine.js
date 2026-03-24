@@ -67,7 +67,7 @@ class ScorpioEngine {
      * Phase 1: Load the binary and set up emulation
      */
     async load(soBuffer, canvas) {
-        Logger.info('=== Scorpio Engine v19: Loading (real render path — flag=0, render-ready=0) ===');
+        Logger.info('=== Scorpio Engine v20.2: Loading (engine-active=1, real render path) ===');
 
         if (typeof uc === 'undefined' || !uc.Unicorn) {
             Logger.error('Unicorn.js not loaded!');
@@ -881,8 +881,9 @@ class ScorpioEngine {
             Logger.success('v20: engine-init flag=1 at singleton+4, D1C=0 (deep render path)');
 
             var GLOBAL_FLAG_ADDR = this.BASE + 0x1A466A8;
-            this.emu.mem_write(GLOBAL_FLAG_ADDR, [0]);  // 0 = normal (not shutdown)
-            Logger.success('v19: engine-running=0 at 0x' + GLOBAL_FLAG_ADDR.toString(16) + ' (normal mode, not shutdown)');
+            this.emu.mem_write(GLOBAL_FLAG_ADDR, [1]);  // v20.2: 1 = ACTIVE (real render!)
+            // OGLESRender reads this byte: 0→glClear only, !=0→tail-call real render at 0x1363164
+            Logger.success('v20.2: engine-active=1 at 0x' + GLOBAL_FLAG_ADDR.toString(16) + ' (REAL render path)');
         } else {
             Logger.warn('v13.2: Singleton pointer is NULL — render-ready flag NOT set');
         }
@@ -941,8 +942,8 @@ class ScorpioEngine {
                 // Also ensure render-ready flag stays 0 (real render path)
                 this.emu.mem_write(this.savedSingletonPtr + 0xD1B, [0]);
             }
-            // v19: Keep flag=0 (normal mode) and render-ready=0 (real render)
-            this.emu.mem_write(this.BASE + 0x1A466A8, [0]);
+            // v20.2: engine-active=1 → real render, D1B=0 → real render path
+            this.emu.mem_write(this.BASE + 0x1A466A8, [1]);
             this.emu.mem_write(this.savedSingletonPtr + 0xD1B, [0]);
             // v20: Keep engine-init flag and deep render path
             this.emu.mem_write(this.savedSingletonPtr + 4, [1]);
