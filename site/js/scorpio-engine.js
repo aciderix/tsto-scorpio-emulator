@@ -32,12 +32,14 @@ class ScorpioEngine {
         this.initialized = false;
         this.running = false;
         this.totalInstructions = 0;
+        this._pcSamples = {};         // PC sampling for spin loop detection
+        this._pcSampleInterval = 100000; // sample every 100K instructions
         this.savedSingletonPtr = 0; // v13.2: saved singleton for restoration
         this.memMapped = 0;
 
         // v15: Render path control
         this.useFullRender = false;       // false=simple(glClear only), true=full RenderScene
-        this.maxFrameInsns = 10000000;    // instruction limit for game frames (10M — was 2M, increased to let render complete)
+        this.maxFrameInsns = 2000000;     // instruction limit for game frames (2M — reduced for faster iteration while debugging spin)
 
         // v15.2: Virtual File System
         this.vfs = null;
@@ -395,6 +397,12 @@ class ScorpioEngine {
         this.emu.hook_add(uc.HOOK_CODE, function(addr, size) {
             self.totalInstructions++;
 
+            // PC sampling every 100K instructions
+            if (self.totalInstructions % self._pcSampleInterval === 0) {
+                var bucket = (addr >>> 4) << 4; // align to 16-byte boundary
+                self._pcSamples[bucket] = (self._pcSamples[bucket] || 0) + 1;
+            }
+
             if (addr >= self.SHIM_BASE && addr < self.SHIM_BASE + self.SHIM_SIZE) {
                 var handler = self.shimHandlers.get(addr);
                 if (handler) {
@@ -581,7 +589,63 @@ class ScorpioEngine {
 
             var insns = this.totalInstructions - startInsns;
             var r0 = this._readReg(uc.ARM_REG_R0);
+            var endPC = this._readReg(uc.ARM_REG_PC);
+            var endLR = this._readReg(uc.ARM_REG_LR);
             Logger.success(name + ': ' + insns + ' instructions, R0=0x' + (r0 >>> 0).toString(16));
+
+            // If we hit the instruction limit, dump where we stopped (spin loop detection)
+            if (!initMode && insns >= maxInsns - 10) {
+                var pcOffset = (endPC - this.BASE) >>> 0;
+                Logger.warn('[SPIN?] Execution stopped at PC=0x' + (endPC>>>0).toString(16) +
+                    ' (BIN+0x' + pcOffset.toString(16) + ') LR=0x' + (endLR>>>0).toString(16));
+                // Dump 32 bytes of code around the stop point for disassembly
+                try {
+                    var codeBytes = this.emu.mem_read(endPC - 16, 48);
+                    var hexDump = '';
+                    for (var bi = 0; bi < codeBytes.length; bi += 4) {
+                        var addr32 = (endPC - 16 + bi) >>> 0;
+                        var hex = '';
+                        for (var bj = 0; bj < 4 && (bi+bj) < codeBytes.length; bj++) {
+                            hex += codeBytes[bi+bj].toString(16).padStart(2,'0') + ' ';
+                        }
+                        var marker = (addr32 === endPC) ? ' <<< PC' : '';
+                        Logger.warn('  0x' + addr32.toString(16) + ': ' + hex + marker);
+                    }
+                } catch(e2) {}
+                // Also read key registers
+                var sp = this._readReg(uc.ARM_REG_SP);
+                var r1 = this._readReg(uc.ARM_REG_R1);
+                var r2 = this._readReg(uc.ARM_REG_R2);
+                var r3 = this._readReg(uc.ARM_REG_R3);
+                Logger.warn('  Regs: R0=0x' + (r0>>>0).toString(16) + ' R1=0x' + (r1>>>0).toString(16) +
+                    ' R2=0x' + (r2>>>0).toString(16) + ' R3=0x' + (r3>>>0).toString(16) + ' SP=0x' + (sp>>>0).toString(16));
+                // Read what memory the code might be polling
+                try {
+                    var polledAddr = r0;
+                    if (polledAddr >= 0x10000000 && polledAddr < 0xF0000000) {
+                        var polledVal = this._readU32FromEmu(polledAddr);
+                        Logger.warn('  [R0]=0x' + polledVal.toString(16));
+                    }
+                    polledAddr = r1;
+                    if (polledAddr >= 0x10000000 && polledAddr < 0xF0000000) {
+                        var polledVal = this._readU32FromEmu(polledAddr);
+                        Logger.warn('  [R1]=0x' + polledVal.toString(16));
+                    }
+                } catch(e3) {}
+
+                // Dump PC sample distribution
+                var samples = Object.entries(this._pcSamples);
+                samples.sort(function(a,b) { return b[1] - a[1]; });
+                Logger.warn('[SPIN] PC sample distribution (top 10):');
+                for (var si = 0; si < Math.min(10, samples.length); si++) {
+                    var sAddr = parseInt(samples[si][0]);
+                    var sCount = samples[si][1];
+                    var sOff = (sAddr - this.BASE) >>> 0;
+                    Logger.warn('  BIN+0x' + sOff.toString(16) + ' (0x' + sAddr.toString(16) + '): ' + sCount + ' hits');
+                }
+                this._pcSamples = {}; // reset for next frame
+            }
+
             return { success: true, instructions: insns, r0: r0 };
         } catch(e) {
             var insns = this.totalInstructions - startInsns;
@@ -744,6 +808,7 @@ class ScorpioEngine {
             this._frameCallProfile = new Map();
         }
 
+        this._pcSamples = {}; // reset PC sampling for this frame
         var frameResult = this.callFunction('Java_com_bight_android_jni_BGCoreJNIBridge_OGLESRender',
             this.jni.prepareCall('OGLESRender'));
 

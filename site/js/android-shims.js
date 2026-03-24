@@ -1046,18 +1046,50 @@ const AndroidShims = {
             'pthread_mutex_unlock':  function(emu, args) { return 0; },
             'pthread_mutex_destroy': function(emu, args) { return 0; },
             'pthread_mutex_trylock': function(emu, args) { return 0; },
-            'pthread_create':        function(emu, args) { return 0; },
+            'pthread_create': function(emu, args) {
+                // args: [thread_ptr, attr, start_routine, arg]
+                var threadPtr = args[0], attr = args[1], startRoutine = args[2], threadArg = args[3];
+                Logger.warn('[PTHREAD] pthread_create: thread_ptr=0x' + (threadPtr>>>0).toString(16) +
+                    ' start_routine=0x' + (startRoutine>>>0).toString(16) +
+                    ' arg=0x' + (threadArg>>>0).toString(16));
+                // Store thread info for potential later execution
+                if (!self._pendingThreads) self._pendingThreads = [];
+                self._pendingThreads.push({ func: startRoutine, arg: threadArg });
+                // Write a fake thread ID
+                if (threadPtr) {
+                    try { engine.emu.mem_write(threadPtr, [self._pendingThreads.length, 0, 0, 0]); } catch(e) {}
+                }
+                return 0;
+            },
             'pthread_join':          function(emu, args) { return 0; },
             'pthread_detach':        function(emu, args) { return 0; },
             'pthread_self':          function(emu, args) { return 1; },
             'pthread_exit':          function(emu, args) { return 0; },
             'pthread_once':          function(emu, args) { return 0; },
             'pthread_cond_init':     function(emu, args) { return 0; },
-            'pthread_cond_wait':     function(emu, args) { return 0; },
+            'pthread_cond_wait': function(emu, args) {
+                if (!self._condWaitCount) self._condWaitCount = 0;
+                self._condWaitCount++;
+                if (self._condWaitCount <= 5 || self._condWaitCount % 10000 === 0) {
+                    Logger.warn('[PTHREAD] pthread_cond_wait #' + self._condWaitCount +
+                        ' cond=0x' + (args[0]>>>0).toString(16) +
+                        ' mutex=0x' + (args[1]>>>0).toString(16));
+                }
+                return 0;
+            },
             'pthread_cond_signal':   function(emu, args) { return 0; },
             'pthread_cond_broadcast':function(emu, args) { return 0; },
             'pthread_cond_destroy':  function(emu, args) { return 0; },
-            'pthread_cond_timedwait':function(emu, args) { return 0; },
+            'pthread_cond_timedwait': function(emu, args) {
+                if (!self._condTimedWaitCount) self._condTimedWaitCount = 0;
+                self._condTimedWaitCount++;
+                if (self._condTimedWaitCount <= 5 || self._condTimedWaitCount % 10000 === 0) {
+                    Logger.warn('[PTHREAD] pthread_cond_timedwait #' + self._condTimedWaitCount +
+                        ' cond=0x' + (args[0]>>>0).toString(16) +
+                        ' mutex=0x' + (args[1]>>>0).toString(16));
+                }
+                return 0;
+            },
             'pthread_attr_init':     function(emu, args) { return 0; },
             'pthread_attr_destroy':  function(emu, args) { return 0; },
             'pthread_attr_setdetachstate':  function(emu, args) { return 0; },
