@@ -146,9 +146,11 @@ class ScorpioEngine {
         this.emu.mem_map(this.SHIM_BASE, this.SHIM_SIZE, uc.PROT_ALL);
         this.memMapped += this.SHIM_SIZE;
 
-        // === v16: Write generic return stub at GENERIC_RETURN (isolated page) ===
-        // Previously at SHIM_BASE, but ARM code was overwriting it with string data
+        // === v17: Write stubs at both GENERIC_RETURN and RETURN_SENTINEL ===
+        // GENERIC_RETURN: used by unresolved GOT entries (MOV R0,#0; BX LR)
+        // RETURN_SENTINEL: used as emu_start stop address (must also be valid ARM code)
         this._writeGenericReturnStub();
+        this._writeReturnSentinelStub();
         // Also write a copy at SHIM_BASE as fallback
         this.emu.mem_write(this.SHIM_BASE, [
             0x00, 0x00, 0xA0, 0xE3,  // MOV R0, #0
@@ -382,6 +384,13 @@ class ScorpioEngine {
         ]);
     }
 
+    _writeReturnSentinelStub() {
+        this.emu.mem_write(this.RETURN_SENTINEL, [
+            0x00, 0x00, 0xA0, 0xE3,  // MOV R0, #0
+            0x1E, 0xFF, 0x2F, 0xE1,  // BX LR
+        ]);
+    }
+
     _readU32FromEmu(addr) {
         try {
             var bytes = this.emu.mem_read(addr, 4);
@@ -579,8 +588,10 @@ class ScorpioEngine {
         var addr = this.BASE + (sym & ~1);
 
         this._writeReg(uc.ARM_REG_SP, this.STACK + this.STACK_SIZE - 0x1000);
-        // v16: LR points to generic return stub (isolated from corruptible SHIM_BASE)
-        this._writeReg(uc.ARM_REG_LR, this.GENERIC_RETURN);
+        // v17: LR points to RETURN_SENTINEL (stop address for emu_start)
+        // This is DIFFERENT from GENERIC_RETURN (used for unresolved GOT entries)
+        // so internal calls to unresolved functions don't stop emu_start prematurely
+        this._writeReg(uc.ARM_REG_LR, this.RETURN_SENTINEL);
 
         if (args.r0 !== undefined) this._writeReg(uc.ARM_REG_R0, args.r0);
         if (args.r1 !== undefined) this._writeReg(uc.ARM_REG_R1, args.r1);
@@ -592,8 +603,8 @@ class ScorpioEngine {
         try {
             // v15.2: Init mode uses 2M (enough for shader loading), game frames use configurable limit
             var maxInsns = initMode ? 2000000 : this.maxFrameInsns;
-            // v16: Use GENERIC_RETURN as stop address so emu_start halts when function returns
-            var stopAddr = this.GENERIC_RETURN;
+            // v17: Use RETURN_SENTINEL as stop address — distinct from GENERIC_RETURN
+            var stopAddr = this.RETURN_SENTINEL;
             if (isThumb) {
                 this.emu.emu_start(addr | 1, stopAddr, 0, maxInsns);
             } else {
@@ -822,7 +833,8 @@ class ScorpioEngine {
         }
 
         this._pcSamples = {}; // reset PC sampling for this frame
-        this._writeGenericReturnStub(); // v16: ensure stub is intact before each frame
+        this._writeGenericReturnStub(); // v17: ensure stubs are intact before each frame
+        this._writeReturnSentinelStub();
         var frameResult = this.callFunction('Java_com_bight_android_jni_BGCoreJNIBridge_OGLESRender',
             this.jni.prepareCall('OGLESRender'));
 
