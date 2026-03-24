@@ -6,20 +6,54 @@ window._capturedLogs = [];
 (function(){
     var origLog = console.log, origWarn = console.warn, origErr = console.error;
     var lastKey = null, lastEntry = null, repeatCount = 0;
+    // Pattern (cycle) dedup for downloaded logs
+    var recentKeys = [], patternLen = 0, patternCount = 0, patternEntry = null, maxPat = 8;
     function ts(){ return new Date().toISOString(); }
+    function matchPat(len) {
+        if (recentKeys.length < len * 2) return false;
+        for (var i = 0; i < len; i++) {
+            if (recentKeys[recentKeys.length - 1 - i] !== recentKeys[recentKeys.length - 1 - len - i]) return false;
+        }
+        return true;
+    }
     function capture(level, args){
         var msg = args.map(String).join(' ');
         var key = level + '|' + msg;
+        // Exact consecutive dedup
         if (key === lastKey && lastEntry) {
             repeatCount++;
             lastEntry.msg = msg + '  x' + repeatCount;
-        } else {
-            var entry = {t: ts(), level: level, msg: msg};
-            window._capturedLogs.push(entry);
-            lastKey = key;
-            lastEntry = entry;
-            repeatCount = 1;
+            return;
         }
+        lastKey = key; lastEntry = null; repeatCount = 1;
+        // Pattern tracking
+        recentKeys.push(key);
+        if (recentKeys.length > maxPat * 3) recentKeys.splice(0, recentKeys.length - maxPat * 3);
+        // Active pattern — check continuation
+        if (patternLen > 0) {
+            if (key === recentKeys[recentKeys.length - 1 - patternLen]) {
+                if ((recentKeys.length % patternLen) === 0) {
+                    patternCount++;
+                    if (patternEntry) patternEntry.msg = '  ↻ repeating ' + patternLen + '-line pattern  x' + patternCount;
+                }
+                return;
+            }
+            patternLen = 0; patternCount = 0; patternEntry = null;
+        }
+        // Detect new pattern
+        for (var len = 2; len <= maxPat; len++) {
+            if (matchPat(len)) {
+                patternLen = len; patternCount = 2;
+                var pe = {t: ts(), level: 'LOG', msg: '  ↻ repeating ' + len + '-line pattern  x2'};
+                window._capturedLogs.push(pe);
+                patternEntry = pe; lastEntry = pe;
+                return;
+            }
+        }
+        // Normal entry
+        var entry = {t: ts(), level: level, msg: msg};
+        window._capturedLogs.push(entry);
+        lastEntry = entry;
     }
     console.log = function(){
         capture('LOG', Array.from(arguments));
