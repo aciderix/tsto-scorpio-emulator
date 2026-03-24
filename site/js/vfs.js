@@ -311,20 +311,38 @@ class VirtualFS {
     // ================================================================
 
     _normalizePath(path) {
+        if (!path) return '';
+        // v22: Strip "(null)/" prefix from paths (caused by NULL base dir pointer in ARM code)
+        path = path.replace(/^\(null\)\/?/g, '');
         // Remove double slashes, trim
-        return path.replace(/\/+/g, '/').replace(/^\/+/, '/').trim();
+        path = path.replace(/\/+/g, '/').replace(/^\/+/, '/').trim();
+        // If stripping left us with just a filename, prefix with /
+        if (path && path[0] !== '/') path = '/' + path;
+        return path;
     }
 
     _resolveFile(path) {
         var normalized = this._normalizePath(path);
-        
+
         // Direct lookup
         if (this._files.has(normalized)) return this._files.get(normalized);
-        
+
         // Alias lookup
         var aliased = this._aliases.get(normalized);
         if (aliased && this._files.has(aliased)) return this._files.get(aliased);
-        
+
+        // v22: Try prepending common base directories for relative paths
+        // (handles NULL base dir producing paths like "/core/res-core/foo.vsh")
+        var basePrefixes = [
+            '/data/data/com.ea.game.simpsons4_row/files',
+            '/data/data/com.ea.game.simpsons4_na/files',
+            '/sdcard/Android/data/com.ea.game.simpsons4_row/files',
+        ];
+        for (var i = 0; i < basePrefixes.length; i++) {
+            var candidate = basePrefixes[i] + normalized;
+            if (this._files.has(candidate)) return this._files.get(candidate);
+        }
+
         // Fuzzy match: try just the filename
         return this._fuzzyFind(normalized);
     }

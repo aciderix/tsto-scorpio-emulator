@@ -355,16 +355,35 @@
 
     // === Resize Canvas ===
     // v14: Only resize BEFORE GL context is created, to avoid destroying it
+    // v22: Fixed for mobile — enforce minimum dimensions
     let glContextCreated = false;
 
     function resizeCanvas() {
         if (glContextCreated) return; // Don't resize after WebGL init - it destroys the context!
         const container = document.getElementById('canvas-container');
-        if (!container) return;
-        const w = container.clientWidth;
-        const h = container.clientHeight;
+
+        // v22: Use multiple size sources, pick the best one
+        var w, h;
+        if (container && container.clientWidth > 100) {
+            w = container.clientWidth;
+            h = container.clientHeight;
+        } else {
+            // Container too small (collapsed flex, mobile, etc) — use window size
+            w = window.innerWidth || document.documentElement.clientWidth || 960;
+            h = window.innerHeight || document.documentElement.clientHeight || 640;
+        }
+
+        // Enforce sane minimums for the game (960x540 is minimum playable)
+        w = Math.max(w, 960);
+        h = Math.max(h, 540);
+
+        // Cap maximums
         canvas.width = Math.min(w, 1280);
         canvas.height = Math.min(h, 720);
+
+        console.log('[Canvas] Resized to ' + canvas.width + 'x' + canvas.height +
+            ' (container: ' + (container ? container.clientWidth + 'x' + container.clientHeight : 'null') +
+            ', window: ' + window.innerWidth + 'x' + window.innerHeight + ')');
     }
 
     window.addEventListener('resize', () => {

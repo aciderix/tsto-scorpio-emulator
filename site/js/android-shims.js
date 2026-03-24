@@ -220,7 +220,10 @@ const AndroidShims = {
                     if (val) {
                         result += this._readCString(emu, val);
                     } else {
-                        result += '(null)';
+                        // v22: NULL %s — output empty string instead of "(null)"
+                        // The game's base directory pointer may be uninitialized.
+                        // VFS _normalizePath handles the resulting relative paths.
+                        result += '';
                     }
                     break;
                 case 'd': case 'i':
