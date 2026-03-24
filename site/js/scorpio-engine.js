@@ -40,7 +40,7 @@ class ScorpioEngine {
 
         // v15: Render path control
         this.useFullRender = false;       // false=simple(glClear only), true=full RenderScene
-        this.maxFrameInsns = 2000000;     // instruction limit for game frames (2M — reduced for faster iteration while debugging spin)
+        this.maxFrameInsns = 10000000;    // instruction limit for game frames (10M safety cap)
 
         // v15.2: Virtual File System
         this.vfs = null;
@@ -592,10 +592,12 @@ class ScorpioEngine {
         try {
             // v15.2: Init mode uses 2M (enough for shader loading), game frames use configurable limit
             var maxInsns = initMode ? 2000000 : this.maxFrameInsns;
+            // v16: Use GENERIC_RETURN as stop address so emu_start halts when function returns
+            var stopAddr = this.GENERIC_RETURN;
             if (isThumb) {
-                this.emu.emu_start(addr | 1, 0, 0, maxInsns);
+                this.emu.emu_start(addr | 1, stopAddr, 0, maxInsns);
             } else {
-                this.emu.emu_start(addr, 0, 0, maxInsns);
+                this.emu.emu_start(addr, stopAddr, 0, maxInsns);
             }
 
             var insns = this.totalInstructions - startInsns;
