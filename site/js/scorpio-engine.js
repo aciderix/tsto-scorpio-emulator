@@ -868,6 +868,18 @@ class ScorpioEngine {
             this.savedSingletonPtr = singletonPtr;
             Logger.success('v19: render-ready=0 at singleton (0x' + singletonPtr.toString(16) + '+0xD1B) — routes to real render function');
 
+            // v20: The render function at 0x12C33C0 does:
+            //   if (singleton[0xD1C] == 0) → deeper path:
+            //     if (singleton[4] == 0) → glClearColor only (SKIP rendering!)
+            //     if (singleton[5] != 0) → error path
+            //     else → call vtable[26] (REAL rendering)
+            // singleton[4] is an "engine initialized" flag. Must be non-zero.
+            // singleton[5] must be 0 (no error).
+            this.emu.mem_write(singletonPtr + 4, [1]);   // engine initialized = true
+            this.emu.mem_write(singletonPtr + 5, [0]);   // no error
+            this.emu.mem_write(singletonPtr + 0xD1C, [0]); // ensure deeper path
+            Logger.success('v20: engine-init flag=1 at singleton+4, D1C=0 (deep render path)');
+
             var GLOBAL_FLAG_ADDR = this.BASE + 0x1A466A8;
             this.emu.mem_write(GLOBAL_FLAG_ADDR, [0]);  // 0 = normal (not shutdown)
             Logger.success('v19: engine-running=0 at 0x' + GLOBAL_FLAG_ADDR.toString(16) + ' (normal mode, not shutdown)');
@@ -932,6 +944,9 @@ class ScorpioEngine {
             // v19: Keep flag=0 (normal mode) and render-ready=0 (real render)
             this.emu.mem_write(this.BASE + 0x1A466A8, [0]);
             this.emu.mem_write(this.savedSingletonPtr + 0xD1B, [0]);
+            // v20: Keep engine-init flag and deep render path
+            this.emu.mem_write(this.savedSingletonPtr + 4, [1]);
+            this.emu.mem_write(this.savedSingletonPtr + 0xD1C, [0]);
         }
         // Start function profiling for first few frames
         if (this._frameProfileCount < this._maxProfileFrames) {
