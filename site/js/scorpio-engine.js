@@ -876,6 +876,15 @@ class ScorpioEngine {
         Logger.info('Step 8/9: Lifecycle.Resume');
         results.push(this.callFunction('Java_com_ea_simpsons_ScorpioJNI_LifecycleResume',
             this.jni.prepareCall('LifecycleResume'), true));
+        // v22: Call Nimble framework lifecycle (needed for engine subsystem init)
+        Logger.info('Step 8b/9: Nimble.onApplicationLaunch');
+        results.push(this.callFunction('Java_com_ea_nimble_bridge_NimbleCppApplicationLifeCycle_onApplicationLaunch',
+            this.jni.prepareCall('NimbleOnAppLaunch'), true));
+
+        Logger.info('Step 8c/9: Nimble.onApplicationResume');
+        results.push(this.callFunction('Java_com_ea_nimble_bridge_NimbleCppApplicationLifeCycle_onApplicationResume',
+            this.jni.prepareCall('NimbleOnAppResume'), true));
+
         results.push(this.callFunction('Java_com_bight_android_jni_BGCoreJNIBridge_resume', {
             r0: this.jni.JNIENV_BASE,
             r1: this.jni.JOBJECT_BASE,
@@ -1034,6 +1043,34 @@ class ScorpioEngine {
         this._pcSamples = {}; // reset PC sampling for this frame
         this._writeGenericReturnStub();
         this._writeReturnSentinelStub();
+
+        // v22: Call OGLESRenderGLLoadingScreen FIRST — this renders the loading/splash screen
+        // while the scene graph is empty. Then also call OGLESRender for the main scene.
+        if (!this._loadingScreenDone) {
+            var loadingResult = this.callFunction('Java_com_bight_android_jni_BGCoreJNIBridge_OGLESRenderGLLoadingScreen',
+                this.jni.prepareCall('OGLESRenderGLLoadingScreen'));
+            var loadInsns = loadingResult ? loadingResult.instructions || 0 : 0;
+
+            // Log first few frames
+            if (!this._loadingScreenFrameCount) this._loadingScreenFrameCount = 0;
+            this._loadingScreenFrameCount++;
+            if (this._loadingScreenFrameCount <= 5) {
+                Logger.info('[v22] OGLESRenderGLLoadingScreen: ' + loadInsns + ' insns, R0=0x' +
+                    ((loadingResult && loadingResult.r0 || 0) >>> 0).toString(16));
+            }
+
+            // Check if scene graph became populated (singleton+0x58 != 0)
+            if (this.savedSingletonPtr) {
+                try {
+                    var renderList = this._readU32FromEmu(this.savedSingletonPtr + 0x58);
+                    if (renderList !== 0) {
+                        Logger.success('[v22] Scene graph populated! singleton+0x58 = 0x' + renderList.toString(16) + ' — switching to OGLESRender');
+                        this._loadingScreenDone = true;
+                    }
+                } catch(e) {}
+            }
+        }
+
         var frameResult = this.callFunction('Java_com_bight_android_jni_BGCoreJNIBridge_OGLESRender',
             this.jni.prepareCall('OGLESRender'));
 

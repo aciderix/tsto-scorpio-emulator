@@ -677,6 +677,8 @@ window._generateReport = function() {
             lines.push('  VFS misses: ' + eng.vfs.missCount);
             lines.push('  VFS reads: ' + eng.vfs.readCount + ' (' + eng.vfs.readBytes + ' bytes)');
         }
+        lines.push('  Loading screen frames: ' + (eng._loadingScreenFrameCount || 0));
+        lines.push('  Loading screen done: ' + !!eng._loadingScreenDone);
     } else {
         lines.push('  Engine not initialized');
     }
