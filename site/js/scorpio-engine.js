@@ -67,7 +67,7 @@ class ScorpioEngine {
      * Phase 1: Load the binary and set up emulation
      */
     async load(soBuffer, canvas) {
-        Logger.info('=== Scorpio Engine v20.2: Loading (engine-active=1, real render path) ===');
+        Logger.info('=== Scorpio Engine v22: Direct render bypass + instruction trace ===');
 
         if (typeof uc === 'undefined' || !uc.Unicorn) {
             Logger.error('Unicorn.js not loaded!');
@@ -188,7 +188,7 @@ class ScorpioEngine {
         this._setupHooks();
 
         this.initialized = true;
-        Logger.success('Scorpio Engine v19 loaded and ready! (real render path)');
+        Logger.success('Scorpio Engine v22 loaded and ready! (direct render bypass)');
         Logger.info('  Memory mapped: ' + (this.memMapped/1024/1024).toFixed(1) + ' MB');
         Logger.info('  JNI functions: ' + this.elf.getJNIFunctions().length);
         Logger.info('  GL imports: ' + this.elf.getGLImports().length);
@@ -896,7 +896,7 @@ class ScorpioEngine {
             // Gate checks at 0x12C36B4/0x12C36C0 are NOP'd as safety net
             var GLOBAL_FLAG_ADDR = this.BASE + 0x1A466A8;
             this.emu.mem_write(GLOBAL_FLAG_ADDR, [0]);
-            Logger.success('v21: engine-flag=0, D1B=0, gate NOPs → full render path');
+            Logger.success('v22: engine-flag=0, D1B=0, gate NOPs → direct render bypass ready');
         } else {
             Logger.warn('v13.2: Singleton pointer is NULL — render-ready flag NOT set');
         }
@@ -944,15 +944,41 @@ class ScorpioEngine {
         return true;
     }
 
+    /**
+     * v22: Call a raw binary address (not a symbol) with given register args
+     */
+    callAddress(addr, args, maxInsns) {
+        args = args || {};
+        maxInsns = maxInsns || this.maxFrameInsns;
+
+        this._writeReg(uc.ARM_REG_SP, this.STACK + this.STACK_SIZE - 0x1000);
+        this._writeReg(uc.ARM_REG_LR, this.RETURN_SENTINEL);
+
+        if (args.r0 !== undefined) this._writeReg(uc.ARM_REG_R0, args.r0);
+        if (args.r1 !== undefined) this._writeReg(uc.ARM_REG_R1, args.r1);
+        if (args.r2 !== undefined) this._writeReg(uc.ARM_REG_R2, args.r2);
+        if (args.r3 !== undefined) this._writeReg(uc.ARM_REG_R3, args.r3);
+
+        var startInsns = this.totalInstructions;
+        try {
+            this.emu.emu_start(addr, this.RETURN_SENTINEL, 0, maxInsns);
+        } catch(e) {
+            Logger.error('callAddress(0x' + addr.toString(16) + ') error: ' + e.message);
+        }
+        var insns = this.totalInstructions - startInsns;
+        var r0 = this._readReg(uc.ARM_REG_R0);
+        var endPC = this._readReg(uc.ARM_REG_PC);
+        return { success: true, instructions: insns, r0: r0, endPC: endPC };
+    }
+
     runFrame() {
-        // v21: Ensure rendering state is correct before each frame
+        // v22: Ensure rendering state is correct before each frame
         if (this.savedSingletonPtr) {
             var SINGLETON_PTR_ADDR = this.BASE + 0x1A45728;
             var currentPtr = this._readU32FromEmu(SINGLETON_PTR_ADDR);
             if (currentPtr === 0) {
                 this._writeU32ToEmu(SINGLETON_PTR_ADDR, this.savedSingletonPtr);
             }
-            // OGLESRender routing: flag==0 → D1B==0 → tail-call 0x12C33C0 (render fn)
             this.emu.mem_write(this.BASE + 0x1A466A8, [0]);     // engine flag = 0
             this.emu.mem_write(this.savedSingletonPtr + 0xD1B, [0]); // D1B = 0 → render path
             this.emu.mem_write(this.savedSingletonPtr + 0xD1C, [0]); // D1C = 0 → deeper path
@@ -964,11 +990,115 @@ class ScorpioEngine {
             this._frameCallProfile = new Map();
         }
 
+        // v22: Auto-enable trace on first frame to capture OGLESRender's early return
+        if (this._frameProfileCount === 0 && !this._v22TraceCaptureDone) {
+            this._traceEnabled = true;
+            this._traceLog = [];
+            this._traceInsnsCount = 0;
+            this._traceMaxInsns = 200; // 111 insns + some margin
+            Logger.info('[v22] ARM trace auto-enabled for first frame (capturing up to 200 insns)');
+        }
+
         this._pcSamples = {}; // reset PC sampling for this frame
-        this._writeGenericReturnStub(); // v17: ensure stubs are intact before each frame
+        this._writeGenericReturnStub();
         this._writeReturnSentinelStub();
         var frameResult = this.callFunction('Java_com_bight_android_jni_BGCoreJNIBridge_OGLESRender',
             this.jni.prepareCall('OGLESRender'));
+
+        // v22: Detect early return and bypass via direct call to 0x12C33C0
+        var oglesInsns = frameResult ? frameResult.instructions || 0 : 0;
+        if (oglesInsns < 500 && this.savedSingletonPtr) {
+            Logger.warn('[v22] OGLESRender returned early (' + oglesInsns + ' insns) — bypassing to direct render call at 0x12C33C0');
+
+            // Analyze the trace to find the early-return branch
+            if (this._traceLog.length > 0 && !this._v22TraceCaptureDone) {
+                this._v22TraceCaptureDone = true;
+                Logger.info('[v22] === OGLESRender TRACE (' + this._traceLog.length + ' instructions) ===');
+
+                // Find branches (instruction bytes containing 0x0A/0x1A/0xEA = B, 0x0B = BL, etc.)
+                var branchInsns = [];
+                for (var i = 0; i < this._traceLog.length; i++) {
+                    var t = this._traceLog[i];
+                    var bytes = t.bytes.split(' ');
+                    if (bytes.length >= 4) {
+                        var opByte = parseInt(bytes[3], 16);
+                        // ARM branch opcodes: 0xEA=B, 0xEB=BL, 0x0A=BEQ, 0x1A=BNE, 0xDA=BLE, etc.
+                        // Also BX LR: 0x1E 0xFF 0x2F 0xE1
+                        var isBranch = (opByte & 0x0F) === 0x0A || (opByte & 0x0F) === 0x0B;
+                        var isBX = (bytes[0] === '1e' && bytes[1] === 'ff' && bytes[2] === '2f' && bytes[3] === 'e1');
+                        if (isBranch || isBX) {
+                            branchInsns.push({ idx: i, entry: t, isBX: isBX });
+                        }
+                    }
+                }
+
+                // Log all branches
+                for (var j = 0; j < branchInsns.length; j++) {
+                    var b = branchInsns[j];
+                    Logger.warn('[v22] Branch #' + b.idx + ': ' + b.entry.off + ' [' + b.entry.bytes + '] R0=' + b.entry.r0 + ' LR=' + b.entry.lr + (b.isBX ? ' (BX LR — RETURN)' : ''));
+                }
+
+                // Log last 10 instructions before return
+                Logger.info('[v22] Last 10 instructions before return:');
+                var start = Math.max(0, this._traceLog.length - 10);
+                for (var k = start; k < this._traceLog.length; k++) {
+                    var t = this._traceLog[k];
+                    Logger.info('  #' + t.n + ' ' + t.off + ' [' + t.bytes + '] R0=' + t.r0 + ' R1=' + t.r1 + ' LR=' + t.lr + (t.mem ? ' ' + t.mem : ''));
+                }
+            }
+
+            // === DIRECT RENDER CALL ===
+            // Re-force all state flags before direct call
+            this.emu.mem_write(this.BASE + 0x1A466A8, [0]);
+            this.emu.mem_write(this.savedSingletonPtr + 0xD1B, [0]);
+            this.emu.mem_write(this.savedSingletonPtr + 0xD1C, [0]);
+            this.emu.mem_write(this.savedSingletonPtr + 4, [1]);
+            this.emu.mem_write(this.savedSingletonPtr + 5, [0]);
+
+            // Enable trace for the direct call too
+            this._traceEnabled = true;
+            this._traceLog = [];
+            this._traceInsnsCount = 0;
+            this._traceMaxInsns = 500;
+
+            Logger.info('[v22] Calling 0x12C33C0 directly with R0=singletonPtr (0x' + this.savedSingletonPtr.toString(16) + ')');
+            var directResult = this.callAddress(this.BASE + 0x12C33C0, {
+                r0: this.savedSingletonPtr
+            }, this.maxFrameInsns);
+
+            Logger.info('[v22] Direct render result: ' + directResult.instructions + ' insns, R0=0x' + (directResult.r0 >>> 0).toString(16) +
+                ' endPC=0x' + (directResult.endPC >>> 0).toString(16));
+
+            // Log direct call trace
+            if (this._traceLog.length > 0) {
+                Logger.info('[v22] === DIRECT 0x12C33C0 TRACE (' + this._traceLog.length + ' instructions) ===');
+                // Log first 20 instructions
+                for (var m = 0; m < Math.min(20, this._traceLog.length); m++) {
+                    var t = this._traceLog[m];
+                    Logger.info('  #' + t.n + ' ' + t.off + ' [' + t.bytes + '] R0=' + t.r0 + ' R1=' + t.r1 + ' LR=' + t.lr + (t.mem ? ' ' + t.mem : ''));
+                }
+                if (this._traceLog.length > 20) {
+                    Logger.info('  ... (' + (this._traceLog.length - 20) + ' more)');
+                }
+                // Log last 10 if different
+                if (this._traceLog.length > 30) {
+                    Logger.info('[v22] Last 10 instructions of direct call:');
+                    var dstart = this._traceLog.length - 10;
+                    for (var dm = dstart; dm < this._traceLog.length; dm++) {
+                        var dt = this._traceLog[dm];
+                        Logger.info('  #' + dt.n + ' ' + dt.off + ' [' + dt.bytes + '] R0=' + dt.r0 + ' R1=' + dt.r1 + ' LR=' + dt.lr + (dt.mem ? ' ' + dt.mem : ''));
+                    }
+                }
+                // Store for download
+                window._armTrace = this._traceLog.map(function(t) {
+                    return '#' + t.n + ' ' + t.off + ' [' + t.bytes + '] R0=' + t.r0 + ' R1=' + t.r1 + ' R2=' + t.r2 + ' R3=' + t.r3 + ' SP=' + t.sp + ' LR=' + t.lr + (t.mem ? ' MEM:' + t.mem : '');
+                }).join('\n');
+                window._armTraceData = this._traceLog;
+            }
+
+            // Merge results
+            frameResult = directResult;
+        }
 
         // Dump function profile for this frame
         if (this._frameCallProfile && this._frameProfileCount < this._maxProfileFrames) {
