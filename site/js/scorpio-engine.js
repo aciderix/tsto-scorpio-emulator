@@ -527,6 +527,20 @@ class ScorpioEngine {
     }
 
     _handleUnmapped(type, addr, size) {
+        // v17: Block FETCH below binary BASE — this is a NULL function pointer call
+        // Execution would slide through zero-filled pages forever. Stop it immediately.
+        if (type === 'fetch' && (addr >>> 0) < this.BASE) {
+            var pc = this._readReg(uc.ARM_REG_PC);
+            var lr = this._readReg(uc.ARM_REG_LR);
+            var r0 = this._readReg(uc.ARM_REG_R0);
+            Logger.error('[MEM] FETCH below BASE at 0x' + (addr>>>0).toString(16) +
+                ' — NULL function pointer! PC=0x' + (pc>>>0).toString(16) +
+                ' LR=0x' + (lr>>>0).toString(16) + ' R0=0x' + (r0>>>0).toString(16));
+            this._unmappedAccessLog.push({ type: type, addr: addr, size: size, pc: pc, lr: lr });
+            try { this.emu.emu_stop(); } catch(e) {}
+            return false;
+        }
+
         var aligned = addr & ~0x3FFF;
         if (!this._autoMapped.has(aligned)) {
             try {
