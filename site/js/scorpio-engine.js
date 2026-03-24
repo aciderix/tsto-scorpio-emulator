@@ -880,10 +880,29 @@ class ScorpioEngine {
             this.emu.mem_write(singletonPtr + 0xD1C, [0]); // ensure deeper path
             Logger.success('v20: engine-init flag=1 at singleton+4, D1C=0 (deep render path)');
 
+            // v20.3: Read the engine state flag AFTER init — don't blindly overwrite!
+            // OGLESRender checks byte[0] at 0x1A466A8:
+            //   0 → glClear only (idle)
+            //   1 → shutdown path (deletes, mutexes)
+            //   Need to find what value LifecycleStart set it to
             var GLOBAL_FLAG_ADDR = this.BASE + 0x1A466A8;
-            this.emu.mem_write(GLOBAL_FLAG_ADDR, [1]);  // v20.2: 1 = ACTIVE (real render!)
-            // OGLESRender reads this byte: 0→glClear only, !=0→tail-call real render at 0x1363164
-            Logger.success('v20.2: engine-active=1 at 0x' + GLOBAL_FLAG_ADDR.toString(16) + ' (REAL render path)');
+            var flagBuf = this.emu.mem_read(GLOBAL_FLAG_ADDR, 32);
+            var currentFlag = flagBuf[0];
+            Logger.info('v20.3: engine-state struct at 0x' + GLOBAL_FLAG_ADDR.toString(16) + ':');
+            Logger.info('  byte[0] (render flag) = ' + currentFlag);
+            Logger.info('  bytes[0..7] = ' + Array.from(flagBuf.slice(0, 8)).map(function(b){return '0x'+b.toString(16)}).join(' '));
+            Logger.info('  bytes[8..15] = ' + Array.from(flagBuf.slice(8, 16)).map(function(b){return '0x'+b.toString(16)}).join(' '));
+            Logger.info('  words[0x14..0x20] = ' + [0x14,0x18,0x1C,0x20].map(function(off){
+                return '0x' + ((flagBuf[off]|(flagBuf[off+1]<<8)|(flagBuf[off+2]<<16)|(flagBuf[off+3]<<24))>>>0).toString(16);
+            }).join(' '));
+            // Don't overwrite — let the engine manage this flag
+            if (currentFlag === 0) {
+                Logger.warn('v20.3: engine flag is 0 after init — render will be glClear only');
+                Logger.warn('  Will try flag=2 (speculative: maybe 2=active rendering)');
+                this.emu.mem_write(GLOBAL_FLAG_ADDR, [2]);
+            } else {
+                Logger.info('v20.3: engine flag=' + currentFlag + ' — leaving as-is');
+            }
         } else {
             Logger.warn('v13.2: Singleton pointer is NULL — render-ready flag NOT set');
         }
@@ -942,8 +961,11 @@ class ScorpioEngine {
                 // Also ensure render-ready flag stays 0 (real render path)
                 this.emu.mem_write(this.savedSingletonPtr + 0xD1B, [0]);
             }
-            // v20.2: engine-active=1 → real render, D1B=0 → real render path
-            this.emu.mem_write(this.BASE + 0x1A466A8, [1]);
+            // v20.3: Don't overwrite engine flag — only ensure it's not 0
+            var eflag = this.emu.mem_read(this.BASE + 0x1A466A8, 1)[0];
+            if (eflag === 0) {
+                this.emu.mem_write(this.BASE + 0x1A466A8, [2]);
+            }
             this.emu.mem_write(this.savedSingletonPtr + 0xD1B, [0]);
             // v20: Keep engine-init flag and deep render path
             this.emu.mem_write(this.savedSingletonPtr + 4, [1]);
