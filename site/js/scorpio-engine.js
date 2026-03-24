@@ -827,12 +827,13 @@ class ScorpioEngine {
             this.savedSingletonPtr = singletonPtr;
             Logger.success('v13.2: Forced render-ready flag at singleton (0x' + singletonPtr.toString(16) + '+0xD1B) — saved for restoration');
             
-            // v15.5: KEEP flag at 0x1A466A8 as ZERO!
-            // flag=1 means SHUTDOWN (destroys singleton, calls closeWithError)
-            // flag=0 means NORMAL render path (currently just glClear because init incomplete)
+            // v18: Set engine-running flag to 1 to enable REAL rendering path
+            // Previously forced to 0 which gave only glClear. Now that ScorpioJNI.init
+            // runs before OGLESInit and BGCore is pre-allocated, the engine state is valid
+            // enough for the real render path (flag != 0 → actual draw calls)
             var GLOBAL_FLAG_ADDR = this.BASE + 0x1A466A8;
-            this.emu.mem_write(GLOBAL_FLAG_ADDR, [0]);
-            Logger.success('v13.5: Cleared engine-running flag at 0x' + GLOBAL_FLAG_ADDR.toString(16) + ' (forces simple GL path)');
+            this.emu.mem_write(GLOBAL_FLAG_ADDR, [1]);
+            Logger.success('v18: Set engine-running flag at 0x' + GLOBAL_FLAG_ADDR.toString(16) + ' (enables real render path)');
         } else {
             Logger.warn('v13.2: Singleton pointer is NULL — render-ready flag NOT set');
         }
@@ -891,10 +892,8 @@ class ScorpioEngine {
                 // Also ensure render-ready flag is set
                 this.emu.mem_write(this.savedSingletonPtr + 0xD1B, [1]);
             }
-            // v15.5: ALWAYS keep flag=0! flag=1 triggers SHUTDOWN/cleanup path
-            // (destroys singleton + calls closeWithError). Render mode is controlled
-            // by instruction budget only, not by this flag.
-            this.emu.mem_write(this.BASE + 0x1A466A8, [0]);
+            // v18: Keep flag=1 for real rendering path (not just glClear)
+            this.emu.mem_write(this.BASE + 0x1A466A8, [1]);
         }
         // Start function profiling for first few frames
         if (this._frameProfileCount < this._maxProfileFrames) {
