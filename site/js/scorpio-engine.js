@@ -896,17 +896,21 @@ class ScorpioEngine {
             this.savedSingletonPtr = singletonPtr;
             Logger.success('v19: render-ready=0 at singleton (0x' + singletonPtr.toString(16) + '+0xD1B) — routes to real render function');
 
-            // v20: The render function at 0x12C33C0 does:
-            //   if (singleton[0xD1C] == 0) → deeper path:
-            //     if (singleton[4] == 0) → glClearColor only (SKIP rendering!)
-            //     if (singleton[5] != 0) → error path
-            //     else → call vtable[26] (REAL rendering)
-            // singleton[4] is an "engine initialized" flag. Must be non-zero.
-            // singleton[5] must be 0 (no error).
-            this.emu.mem_write(singletonPtr + 4, [1]);   // engine initialized = true
-            this.emu.mem_write(singletonPtr + 5, [0]);   // no error
-            this.emu.mem_write(singletonPtr + 0xD1C, [0]); // ensure deeper path
-            Logger.success('v20: engine-init flag=1 at singleton+4, D1C=0 (deep render path)');
+            // v22 FIX: The render function at 0x12C33C0 does:
+            //   LDRB R1, [singleton, #0xD1C]
+            //   CMP R1, #0
+            //   BEQ skip_render_body         ← 0 = SKIP (not enter!)
+            //   ... main render body (scene graph traversal, draw calls) ...
+            // skip_render_body:
+            //   LDRB R0, [singleton, #4]     ← engine initialized check
+            //   if (R0 != 0 && singleton[5] == 0) → glClearColor only
+            //
+            // So: 0xD1C must be NON-ZERO (1) to enter the render body!
+            // Previous versions had this inverted (set 0, which skipped rendering).
+            this.emu.mem_write(singletonPtr + 4, [1]);     // engine initialized = true
+            this.emu.mem_write(singletonPtr + 5, [0]);     // no error
+            this.emu.mem_write(singletonPtr + 0xD1C, [1]); // 1 = ENTER render body (BNE path)
+            Logger.success('v22: engine-init=1, error=0, D1C=1 (render body ENABLED)');
 
             // v21: engine flag=0, D1B=0 routes through OGLESRender to real render fn
             // Gate checks at 0x12C36B4/0x12C36C0 are NOP'd as safety net
@@ -997,7 +1001,7 @@ class ScorpioEngine {
             }
             this.emu.mem_write(this.BASE + 0x1A466A8, [0]);     // engine flag = 0
             this.emu.mem_write(this.savedSingletonPtr + 0xD1B, [0]); // D1B = 0 → render path
-            this.emu.mem_write(this.savedSingletonPtr + 0xD1C, [0]); // D1C = 0 → deeper path
+            this.emu.mem_write(this.savedSingletonPtr + 0xD1C, [1]); // D1C = 1 → enter render body (BNE)
             this.emu.mem_write(this.savedSingletonPtr + 4, [1]);     // engine init = 1
             this.emu.mem_write(this.savedSingletonPtr + 5, [0]);     // no error
         }
@@ -1067,7 +1071,7 @@ class ScorpioEngine {
             // Re-force all state flags before direct call
             this.emu.mem_write(this.BASE + 0x1A466A8, [0]);
             this.emu.mem_write(this.savedSingletonPtr + 0xD1B, [0]);
-            this.emu.mem_write(this.savedSingletonPtr + 0xD1C, [0]);
+            this.emu.mem_write(this.savedSingletonPtr + 0xD1C, [1]); // 1 = enter render body
             this.emu.mem_write(this.savedSingletonPtr + 4, [1]);
             this.emu.mem_write(this.savedSingletonPtr + 5, [0]);
 

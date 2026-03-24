@@ -663,7 +663,7 @@ window._generateReport = function() {
     lines.push('--- ENGINE STATE ---');
     var eng = window._engine;
     if (eng) {
-        lines.push('  Singleton: 0x' + ((eng._singletonAddr || 0) >>> 0).toString(16));
+        lines.push('  Singleton: 0x' + ((eng.savedSingletonPtr || 0) >>> 0).toString(16));
         lines.push('  BASE: 0x' + ((eng.BASE || 0) >>> 0).toString(16));
         lines.push('  Shims registered: ' + (eng.shimHandlers ? eng.shimHandlers.size : '?'));
         if (eng.glBridge) {
