@@ -113,19 +113,29 @@ class ScorpioEngine {
         this.emu.mem_map(this.BASE, mapSize, uc.PROT_ALL);
         this.memMapped += mapSize;
 
-        // Write relocated binary to Unicorn
-        Logger.arm('Writing relocated binary to emulator memory...');
+        // v20: Write binary using ELF segment mapping (vaddr != file offset!)
+        // Previously loaded as flat file (BASE+file_off), but segment 2+ have
+        // vaddr != file_offset, causing vtables/data to be at wrong addresses.
+        Logger.arm('Writing relocated binary using ELF segment mapping...');
         var u8 = new Uint8Array(soBuffer);
         var CHUNK = 1024 * 1024;
-        for (var off = 0; off < u8.length; off += CHUNK) {
-            var end = Math.min(off + CHUNK, u8.length);
-            var chunk = Array.from(u8.slice(off, end));
-            this.emu.mem_write(this.BASE + off, chunk);
-            if ((off / CHUNK) % 5 === 0) {
-                Logger.arm('  Written ' + (off/1024/1024).toFixed(1) + ' / ' + (u8.length/1024/1024).toFixed(1) + ' MB');
+        var totalWritten = 0;
+        for (var seg of this.elf.segments) {
+            if (seg.type !== 1) continue; // PT_LOAD only
+            var diff = seg.vaddr - seg.offset;
+            Logger.arm('  LOAD seg: file 0x' + seg.offset.toString(16) + ' → VA 0x' + seg.vaddr.toString(16) +
+                ' (filesz=0x' + seg.filesz.toString(16) + ', gap=' + diff + ')');
+            for (var off = 0; off < seg.filesz; off += CHUNK) {
+                var end = Math.min(off + CHUNK, seg.filesz);
+                var filePos = seg.offset + off;
+                var memAddr = this.BASE + seg.vaddr + off;
+                var chunk = Array.from(u8.slice(filePos, filePos + (end - off)));
+                this.emu.mem_write(memAddr, chunk);
             }
+            totalWritten += seg.filesz;
         }
-        Logger.success('Binary loaded: ' + (u8.length/1024/1024).toFixed(1) + ' MB (with relocations applied)');
+        Logger.success('Binary loaded: ' + (totalWritten/1024/1024).toFixed(1) + ' MB via ' +
+            this.elf.segments.filter(function(s){return s.type===1}).length + ' LOAD segments (with relocations)');
 
         // BSS
         for (var seg of this.elf.segments) {
