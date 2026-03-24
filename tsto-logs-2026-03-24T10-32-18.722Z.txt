@@ -1,0 +1,467 @@
+2026-03-24T10:31:37.301Z [LOG] ✅ TSTO v15.2 — VFS file I/O! ARM code can now load shaders natively!
+2026-03-24T10:31:37.556Z [LOG] [UC2] Initializing Unicorn2 WASM module...
+2026-03-24T10:31:37.756Z [LOG] [UC2] Unicorn2 WASM module ready!
+2026-03-24T10:31:37.756Z [LOG] [UC2] Global uc object ready with Unicorn2 VFP support!
+2026-03-24T10:31:37.874Z [LOG] [INFO] 🍩 TSTO Web Emulator ready
+2026-03-24T10:31:37.875Z [LOG] [INFO] Waiting for libscorpio.so to load...
+2026-03-24T10:31:47.710Z [LOG] [INFO] Starting engine initialization...
+2026-03-24T10:31:47.710Z [LOG] [INFO] Binary size: 26.2 MB
+2026-03-24T10:31:47.712Z [LOG] [INFO] === Scorpio Engine v15.5: Loading (SharedPrefs + std::string shims + flag fix) ===
+2026-03-24T10:31:47.712Z [LOG] [✅] Unicorn.js loaded OK (uc.Unicorn available)
+2026-03-24T10:31:47.713Z [LOG] [ELF] Parsing ELF binary (26.2 MB)...
+2026-03-24T10:31:47.714Z [LOG] [ELF] Entry: 0x4279c0, 9 program headers, 28 section headers
+2026-03-24T10:31:47.715Z [LOG] [ELF]   LOAD VA=0x0 fileOff=0x0 filesz=0x19a4620 memsz=0x19a4620 R-X BSS=0x0
+2026-03-24T10:31:47.715Z [LOG] [ELF]   LOAD VA=0x19a5620 fileOff=0x19a4620 filesz=0x843f8 memsz=0x843f8 RW- BSS=0x0
+2026-03-24T10:31:47.716Z [LOG] [ELF]   LOAD VA=0x1a2aa18 fileOff=0x1a28a18 filesz=0x9540 memsz=0x1e274 RW- BSS=0x14d34
+2026-03-24T10:31:47.717Z [LOG] [ELF] Virtual memory: 0x0 - 0x1a48c8c, mapSize=0x1a49000
+2026-03-24T10:31:47.772Z [LOG] [ELF] Symbols: 16983 total, 16453 exported
+2026-03-24T10:31:47.877Z [LOG] [ELF] Relocations: 102812 total
+2026-03-24T10:31:47.878Z [LOG] [ELF]   R_ARM_RELATIVE (23): 80136
+2026-03-24T10:31:47.878Z [LOG] [ELF]   R_ARM_ABS32 (2):     11409
+2026-03-24T10:31:47.879Z [LOG] [ELF]   R_ARM_GLOB_DAT (21): 882
+2026-03-24T10:31:47.879Z [LOG] [ELF]   R_ARM_JUMP_SLOT(22): 10385
+2026-03-24T10:31:47.880Z [LOG] [✅] ELF parsed: 16453 exports, 11267 PLT, 80136 RELATIVE, mapSize=0x1a49000
+2026-03-24T10:31:47.944Z [LOG] [GL] WebGL context created: WebGL 1.0 (OpenGL ES 2.0 Chromium)
+2026-03-24T10:31:47.945Z [LOG] [INFO] [VFS] Virtual File System initialized
+2026-03-24T10:31:47.945Z [LOG] [INFO] [VFS] Virtual filesystem created
+2026-03-24T10:31:47.946Z [LOG] [INFO] === Applying data relocations ===
+2026-03-24T10:31:47.957Z [LOG] [✅] R_ARM_RELATIVE: 80136 applied (11ms)
+2026-03-24T10:31:47.961Z [LOG] [✅] R_ARM_ABS32: 10482 applied (3202 rebased from null sym) (3ms)
+2026-03-24T10:31:47.962Z [LOG] [✅] Total data relocations applied: 90618
+2026-03-24T10:31:47.962Z [LOG] [ARM] Creating ARM emulator...
+2026-03-24T10:31:47.977Z [LOG] [UC2] Unicorn2 engine created, handle: 141144
+2026-03-24T10:31:47.978Z [LOG] [✅] Unicorn.js ARM emulator created
+2026-03-24T10:31:47.978Z [LOG] [ARM] Mapping binary: 0x10000000 - 0x11a49000 (26.3 MB)
+2026-03-24T10:31:47.997Z [LOG] [ARM] Writing relocated binary to emulator memory...
+2026-03-24T10:31:48.067Z [LOG] [ARM]   Written 0.0 / 26.2 MB
+2026-03-24T10:31:48.359Z [LOG] [ARM]   Written 5.0 / 26.2 MB
+2026-03-24T10:31:48.749Z [LOG] [ARM]   Written 10.0 / 26.2 MB
+2026-03-24T10:31:49.100Z [LOG] [ARM]   Written 15.0 / 26.2 MB
+2026-03-24T10:31:49.396Z [LOG] [ARM]   Written 20.0 / 26.2 MB
+2026-03-24T10:31:49.694Z [LOG] [ARM]   Written 25.0 / 26.2 MB
+2026-03-24T10:31:49.706Z [LOG] [✅] Binary loaded: 26.2 MB (with relocations applied)
+2026-03-24T10:31:49.726Z [LOG] [JNI] Setting up JNI environment v3.0...
+2026-03-24T10:31:49.729Z [LOG] [JNI] JNI environment v3.0 ready
+2026-03-24T10:31:49.729Z [LOG] [JNI]   JNIEnv*  = 0xd0000000
+2026-03-24T10:31:49.730Z [LOG] [JNI]   JavaVM*  = 0xd0010000
+2026-03-24T10:31:49.730Z [LOG] [JNI]   Strings  = 0xc0000000 (1MB)
+2026-03-24T10:31:49.730Z [LOG] [JNI]   BGAndroidInfo = 0xd0040000
+2026-03-24T10:31:49.731Z [LOG] [INFO] Setting up function shims...
+2026-03-24T10:31:49.731Z [LOG] [INFO] Android shims v2.1 initialized (real memcpy/strlen + VFS file I/O)
+2026-03-24T10:31:49.734Z [LOG] [INFO]   28 data symbols allocated
+2026-03-24T10:31:49.736Z [LOG] [INFO]   437 PLT shims registered
+2026-03-24T10:31:49.739Z [LOG] [INFO]   179 JNI vtable handlers registered
+2026-03-24T10:31:49.739Z [LOG] [INFO]   5 JavaVM vtable handlers registered
+2026-03-24T10:31:49.740Z [LOG] [INFO]   Total shim handlers: 621
+2026-03-24T10:31:49.740Z [LOG] [INFO] Applying PLT/GOT relocations...
+2026-03-24T10:31:49.889Z [LOG] [✅] PLT/GOT: 435 shimmed, 10746 internal, 86 → generic return
+2026-03-24T10:31:49.890Z [LOG] [INFO] PLT shim address mapping (621 entries):
+2026-03-24T10:31:49.891Z [LOG] [INFO]   0xe00004e0 → malloc
+2026-03-24T10:31:49.891Z [LOG] [INFO]   0xe00004e4 → calloc
+2026-03-24T10:31:49.892Z [LOG] [INFO]   0xe00004e8 → realloc
+2026-03-24T10:31:49.892Z [LOG] [INFO]   0xe00004ec → free
+2026-03-24T10:31:49.893Z [LOG] [INFO]   0xe00004f0 → memcpy
+2026-03-24T10:31:49.893Z [LOG] [INFO]   0xe00004f4 → memmove
+2026-03-24T10:31:49.894Z [LOG] [INFO]   0xe00004f8 → memset
+2026-03-24T10:31:49.894Z [LOG] [INFO]   0xe00004fc → __aeabi_memcpy
+2026-03-24T10:31:49.895Z [LOG] [INFO]   0xe0000500 → __aeabi_memcpy4
+2026-03-24T10:31:49.895Z [LOG] [INFO]   0xe0000504 → __aeabi_memcpy8
+2026-03-24T10:31:49.896Z [LOG] [INFO]   0xe0000508 → __aeabi_memmove
+2026-03-24T10:31:49.896Z [LOG] [INFO]   0xe000050c → __aeabi_memmove4
+2026-03-24T10:31:49.897Z [LOG] [INFO]   0xe0000510 → __aeabi_memset
+2026-03-24T10:31:49.897Z [LOG] [INFO]   0xe0000514 → __aeabi_memset8
+2026-03-24T10:31:49.898Z [LOG] [INFO]   0xe0000518 → __aeabi_memclr
+2026-03-24T10:31:49.899Z [LOG] [INFO]   0xe000051c → __aeabi_memclr4
+2026-03-24T10:31:49.899Z [LOG] [INFO]   0xe0000520 → __aeabi_memclr8
+2026-03-24T10:31:49.900Z [LOG] [INFO]   0xe0000524 → strlen
+2026-03-24T10:31:49.900Z [LOG] [INFO]   0xe0000528 → strcmp
+2026-03-24T10:31:49.901Z [LOG] [INFO]   0xe000052c → strncmp
+2026-03-24T10:31:49.901Z [LOG] [INFO]   0xe0000530 → strcpy
+2026-03-24T10:31:49.902Z [LOG] [INFO]   0xe0000534 → strncpy
+2026-03-24T10:31:49.902Z [LOG] [INFO]   0xe0000538 → strdup
+2026-03-24T10:31:49.903Z [LOG] [INFO]   0xe000053c → strcat
+2026-03-24T10:31:49.904Z [LOG] [INFO]   0xe0000540 → strchr
+2026-03-24T10:31:49.904Z [LOG] [INFO]   0xe0000544 → strrchr
+2026-03-24T10:31:49.905Z [LOG] [INFO]   0xe0000548 → strstr
+2026-03-24T10:31:49.905Z [LOG] [INFO]   0xe000054c → memcmp
+2026-03-24T10:31:49.906Z [LOG] [INFO]   0xe0000550 → memchr
+2026-03-24T10:31:49.906Z [LOG] [INFO]   0xe0000554 → floorf
+2026-03-24T10:31:49.907Z [LOG] [INFO]   ... and 591 more
+2026-03-24T10:31:49.908Z [LOG] [WARN] Unresolved externals (first 50): getpeername, recvfrom, sendto, gethostname, waitpid, kill, socketpair, fork, execl, basename, strspn, getnameinfo, gethostbyname, shutdown, mlock, madvise, pthread_rwlock_init, pthread_rwlock_rdlock, pthread_rwlock_wrlock, pthread_rwlock_unlock, pthread_rwlock_destroy, pthread_key_create, pthread_getspecific, pthread_setspecific, pthread_key_delete, pthread_equal, getuid, getgid, getegid, strcspn, clearerr, fdopen, chmod, bsd_signal, __aeabi_memset4, __assert2, deflateInit_, rewind, _ZNSt6__ndk113random_deviceC1ERKNS_12basic_stringIcNS_11char_traitsIcEENS_9allocatorIcEEEE, _ZNSt6__ndk113random_deviceclEv, _ZNSt6__ndk113random_deviceD1Ev, _ZNSt6__ndk19to_stringEx, __aeabi_memmove8, _ZSt9terminatev, _ZNSt6__ndk19to_stringEi, __dynamic_cast, tolower, _ZNSt11logic_errorC2EPKc, dl_unwind_find_exidx, _ZNSt6__ndk16localeC1Ev
+2026-03-24T10:31:49.908Z [LOG] [WARN]   ... and 36 more
+2026-03-24T10:31:49.909Z [LOG] [UC2] Hook added, type: 4 slot: 0
+2026-03-24T10:31:49.909Z [LOG] [UC2] Hook added, type: 16 slot: 1
+2026-03-24T10:31:49.909Z [LOG] [UC2] Hook added, type: 32 slot: 2
+2026-03-24T10:31:49.909Z [LOG] [UC2] Hook added, type: 64 slot: 3
+2026-03-24T10:31:49.909Z [LOG] [UC2] Hook added, type: 4 slot: 4
+2026-03-24T10:31:49.910Z [LOG] [INFO] Hooks installed: code interception + memory auto-mapping + ARM trace
+2026-03-24T10:31:49.910Z [LOG] [✅] Scorpio Engine v15.5 loaded and ready! (SharedPrefs + std::string + flag fix)
+2026-03-24T10:31:49.911Z [LOG] [INFO]   Memory mapped: 61.3 MB
+2026-03-24T10:31:49.918Z [LOG] [INFO]   JNI functions: 74
+2026-03-24T10:31:49.927Z [LOG] [INFO]   GL imports: 50
+2026-03-24T10:31:49.927Z [LOG] [INFO]   PLT entries: 11267
+2026-03-24T10:31:49.928Z [LOG] [INFO]   Shim handlers: 621
+2026-03-24T10:31:49.928Z [LOG] [INFO]   Data relocations: 80136 RELATIVE + 11409 ABS32
+2026-03-24T10:31:49.929Z [LOG] [INFO]   JNI vtable handlers: active
+2026-03-24T10:31:49.929Z [LOG] [INFO] 📁 Loading shader files into VFS...
+2026-03-24T10:31:50.107Z [LOG] [INFO] [VFS] ✅ Registered: /data/data/com.ea.game.simpsons4_row/files/core/res-core/2DShader.vsh (980 bytes)
+2026-03-24T10:31:50.108Z [LOG] [INFO] [VFS] ✅ Registered: /data/data/com.ea.game.simpsons4_na/files/core/res-core/2DShader.vsh (980 bytes)
+2026-03-24T10:31:50.109Z [LOG] [INFO] [VFS] ✅ Registered: /sdcard/Android/data/com.ea.game.simpsons4_row/files/core/res-core/2DShader.vsh (980 bytes)
+2026-03-24T10:31:50.109Z [LOG] [INFO] [VFS] ✅ Registered: /sdcard/Android/data/com.ea.game.simpsons4_na/files/core/res-core/2DShader.vsh (980 bytes)
+2026-03-24T10:31:50.110Z [LOG] [INFO] [VFS] ✅ Registered: /data/data/com.ea.game.simpsons4_row/cache/core/res-core/2DShader.vsh (980 bytes)
+2026-03-24T10:31:50.111Z [LOG] [INFO] [VFS] ✅ Registered: /core/res-core/2DShader.vsh (980 bytes)
+2026-03-24T10:31:50.112Z [LOG] [INFO] [VFS] ✅ Registered: 2DShader.vsh (980 bytes)
+2026-03-24T10:31:50.113Z [LOG] [INFO] [VFS] ✅ Registered: core/res-core/2DShader.vsh (980 bytes)
+2026-03-24T10:31:50.113Z [LOG] [INFO] [VFS] 📦 Shader "2DShader.vsh" registered under 8 paths
+2026-03-24T10:31:50.280Z [LOG] [INFO] [VFS] ✅ Registered: /data/data/com.ea.game.simpsons4_row/files/core/res-core/2DShader.fsh (1631 bytes)
+2026-03-24T10:31:50.284Z [LOG] [INFO] [VFS] ✅ Registered: /data/data/com.ea.game.simpsons4_na/files/core/res-core/2DShader.fsh (1631 bytes)
+2026-03-24T10:31:50.288Z [LOG] [INFO] [VFS] ✅ Registered: /sdcard/Android/data/com.ea.game.simpsons4_row/files/core/res-core/2DShader.fsh (1631 bytes)
+2026-03-24T10:31:50.290Z [LOG] [INFO] [VFS] ✅ Registered: /sdcard/Android/data/com.ea.game.simpsons4_na/files/core/res-core/2DShader.fsh (1631 bytes)
+2026-03-24T10:31:50.292Z [LOG] [INFO] [VFS] ✅ Registered: /data/data/com.ea.game.simpsons4_row/cache/core/res-core/2DShader.fsh (1631 bytes)
+2026-03-24T10:31:50.294Z [LOG] [INFO] [VFS] ✅ Registered: /core/res-core/2DShader.fsh (1631 bytes)
+2026-03-24T10:31:50.296Z [LOG] [INFO] [VFS] ✅ Registered: 2DShader.fsh (1631 bytes)
+2026-03-24T10:31:50.297Z [LOG] [INFO] [VFS] ✅ Registered: core/res-core/2DShader.fsh (1631 bytes)
+2026-03-24T10:31:50.298Z [LOG] [INFO] [VFS] 📦 Shader "2DShader.fsh" registered under 8 paths
+2026-03-24T10:31:50.465Z [LOG] [INFO] [VFS] ✅ Registered: /data/data/com.ea.game.simpsons4_row/files/core/res-core/UberShader.vsh (973 bytes)
+2026-03-24T10:31:50.467Z [LOG] [INFO] [VFS] ✅ Registered: /data/data/com.ea.game.simpsons4_na/files/core/res-core/UberShader.vsh (973 bytes)
+2026-03-24T10:31:50.469Z [LOG] [INFO] [VFS] ✅ Registered: /sdcard/Android/data/com.ea.game.simpsons4_row/files/core/res-core/UberShader.vsh (973 bytes)
+2026-03-24T10:31:50.471Z [LOG] [INFO] [VFS] ✅ Registered: /sdcard/Android/data/com.ea.game.simpsons4_na/files/core/res-core/UberShader.vsh (973 bytes)
+2026-03-24T10:31:50.473Z [LOG] [INFO] [VFS] ✅ Registered: /data/data/com.ea.game.simpsons4_row/cache/core/res-core/UberShader.vsh (973 bytes)
+2026-03-24T10:31:50.475Z [LOG] [INFO] [VFS] ✅ Registered: /core/res-core/UberShader.vsh (973 bytes)
+2026-03-24T10:31:50.477Z [LOG] [INFO] [VFS] ✅ Registered: UberShader.vsh (973 bytes)
+2026-03-24T10:31:50.479Z [LOG] [INFO] [VFS] ✅ Registered: core/res-core/UberShader.vsh (973 bytes)
+2026-03-24T10:31:50.480Z [LOG] [INFO] [VFS] 📦 Shader "UberShader.vsh" registered under 8 paths
+2026-03-24T10:31:50.713Z [LOG] [INFO] [VFS] ✅ Registered: /data/data/com.ea.game.simpsons4_row/files/core/res-core/UberShader.fsh (2001 bytes)
+2026-03-24T10:31:50.715Z [LOG] [INFO] [VFS] ✅ Registered: /data/data/com.ea.game.simpsons4_na/files/core/res-core/UberShader.fsh (2001 bytes)
+2026-03-24T10:31:50.716Z [LOG] [INFO] [VFS] ✅ Registered: /sdcard/Android/data/com.ea.game.simpsons4_row/files/core/res-core/UberShader.fsh (2001 bytes)
+2026-03-24T10:31:50.718Z [LOG] [INFO] [VFS] ✅ Registered: /sdcard/Android/data/com.ea.game.simpsons4_na/files/core/res-core/UberShader.fsh (2001 bytes)
+2026-03-24T10:31:50.719Z [LOG] [INFO] [VFS] ✅ Registered: /data/data/com.ea.game.simpsons4_row/cache/core/res-core/UberShader.fsh (2001 bytes)
+2026-03-24T10:31:50.720Z [LOG] [INFO] [VFS] ✅ Registered: /core/res-core/UberShader.fsh (2001 bytes)
+2026-03-24T10:31:50.722Z [LOG] [INFO] [VFS] ✅ Registered: UberShader.fsh (2001 bytes)
+2026-03-24T10:31:50.723Z [LOG] [INFO] [VFS] ✅ Registered: core/res-core/UberShader.fsh (2001 bytes)
+2026-03-24T10:31:50.724Z [LOG] [INFO] [VFS] 📦 Shader "UberShader.fsh" registered under 8 paths
+2026-03-24T10:31:50.725Z [LOG] [INFO] [VFS] 📦 Loaded 4/4 shader files
+2026-03-24T10:31:50.726Z [LOG] [INFO] [VFS] ✅ Registered: /data/data/com.ea.game.simpsons4_row/files/core/res-core/Shaders.xml (651 bytes)
+2026-03-24T10:31:50.728Z [LOG] [INFO] [VFS] ✅ Registered: /data/data/com.ea.game.simpsons4_row/files/Shaders.xml (651 bytes)
+2026-03-24T10:31:50.729Z [LOG] [INFO] [VFS] ✅ Registered: /data/data/com.ea.game.simpsons4_na/files/core/res-core/Shaders.xml (651 bytes)
+2026-03-24T10:31:50.730Z [LOG] [INFO] [VFS] ✅ Registered: /data/data/com.ea.game.simpsons4_na/files/Shaders.xml (651 bytes)
+2026-03-24T10:31:50.731Z [LOG] [INFO] [VFS] ✅ Registered: /core/res-core/Shaders.xml (651 bytes)
+2026-03-24T10:31:50.732Z [LOG] [INFO] [VFS] ✅ Registered: /Shaders.xml (651 bytes)
+2026-03-24T10:31:50.733Z [LOG] [INFO] [VFS] ✅ Registered: Shaders.xml (651 bytes)
+2026-03-24T10:31:50.734Z [LOG] [INFO] [VFS] 📄 Shaders.xml registered
+2026-03-24T10:31:50.735Z [LOG] [✅] 📁 VFS ready: 4 shaders, 39 total files
+2026-03-24T10:31:50.736Z [LOG] [INFO] 🎮 Loading game assets into VFS (this may take a moment)...
+2026-03-24T10:31:50.737Z [LOG] [INFO] [VFS] 🚀 Loading 20 game assets...
+2026-03-24T10:31:50.995Z [LOG] [INFO] [VFS] 📦 Asset: core/res-core/0 (1487 bytes) → 8 paths
+2026-03-24T10:31:50.996Z [LOG] [INFO] [VFS] ✅ [1/20] core/res-core/0 (0.0 MB)
+2026-03-24T10:31:52.159Z [LOG] [INFO] [VFS] 📦 Asset: core/res-core/1 (10781189 bytes) → 8 paths
+2026-03-24T10:31:52.160Z [LOG] [INFO] [VFS] ✅ [2/20] core/res-core/1 (10.3 MB)
+2026-03-24T10:31:52.314Z [LOG] [INFO] [VFS] 📦 Asset: core/core-large/0 (800 bytes) → 8 paths
+2026-03-24T10:31:52.315Z [LOG] [INFO] [VFS] ✅ [3/20] core/core-large/0 (0.0 MB)
+2026-03-24T10:31:52.483Z [LOG] [INFO] [VFS] 📦 Asset: core/core-large/1 (18656 bytes) → 8 paths
+2026-03-24T10:31:52.485Z [LOG] [INFO] [VFS] ✅ [4/20] core/core-large/1 (0.0 MB)
+2026-03-24T10:31:52.719Z [LOG] [INFO] [VFS] 📦 Asset: core/core-medium/0 (801 bytes) → 8 paths
+2026-03-24T10:31:52.723Z [LOG] [INFO] [VFS] ✅ [5/20] core/core-medium/0 (0.0 MB)
+2026-03-24T10:31:52.996Z [LOG] [INFO] [VFS] 📦 Asset: core/core-medium/1 (15330 bytes) → 8 paths
+2026-03-24T10:31:53.001Z [LOG] [INFO] [VFS] ✅ [6/20] core/core-medium/1 (0.0 MB)
+2026-03-24T10:31:53.166Z [LOG] [INFO] [VFS] 📦 Asset: core/core-medium-small/0 (799 bytes) → 8 paths
+2026-03-24T10:31:53.167Z [LOG] [INFO] [VFS] ✅ [7/20] core/core-medium-small/0 (0.0 MB)
+2026-03-24T10:31:53.336Z [LOG] [INFO] [VFS] 📦 Asset: core/core-medium-small/1 (10649 bytes) → 8 paths
+2026-03-24T10:31:53.337Z [LOG] [INFO] [VFS] ✅ [8/20] core/core-medium-small/1 (0.0 MB)
+2026-03-24T10:31:53.508Z [LOG] [INFO] [VFS] 📦 Asset: core/core-small/0 (801 bytes) → 8 paths
+2026-03-24T10:31:53.510Z [LOG] [INFO] [VFS] ✅ [9/20] core/core-small/0 (0.0 MB)
+2026-03-24T10:31:53.685Z [LOG] [INFO] [VFS] 📦 Asset: core/core-small/1 (8733 bytes) → 8 paths
+2026-03-24T10:31:53.690Z [LOG] [INFO] [VFS] ✅ [10/20] core/core-small/1 (0.0 MB)
+2026-03-24T10:31:53.959Z [LOG] [INFO] [VFS] 📦 Asset: core/support/0 (140 bytes) → 8 paths
+2026-03-24T10:31:53.963Z [LOG] [INFO] [VFS] ✅ [11/20] core/support/0 (0.0 MB)
+2026-03-24T10:31:54.155Z [LOG] [INFO] [VFS] 📦 Asset: core/support/1 (266 bytes) → 8 paths
+2026-03-24T10:31:54.159Z [LOG] [INFO] [VFS] ✅ [12/20] core/support/1 (0.0 MB)
+2026-03-24T10:31:54.329Z [LOG] [INFO] [VFS] 📦 Asset: core/core-splashes-large/0 (2696 bytes) → 8 paths
+2026-03-24T10:31:54.330Z [LOG] [INFO] [VFS] ✅ [13/20] core/core-splashes-large/0 (0.0 MB)
+2026-03-24T10:31:55.854Z [LOG] [INFO] [VFS] 📦 Asset: core/core-splashes-large/1 (9670767 bytes) → 8 paths
+2026-03-24T10:31:55.855Z [LOG] [INFO] [VFS] ✅ [14/20] core/core-splashes-large/1 (9.2 MB)
+2026-03-24T10:31:56.032Z [LOG] [INFO] [VFS] 📦 Asset: core/core-splashes-medium/0 (2697 bytes) → 8 paths
+2026-03-24T10:31:56.036Z [LOG] [INFO] [VFS] ✅ [15/20] core/core-splashes-medium/0 (0.0 MB)
+2026-03-24T10:31:56.942Z [LOG] [INFO] [VFS] 📦 Asset: core/core-splashes-medium/1 (3723928 bytes) → 8 paths
+2026-03-24T10:31:56.944Z [LOG] [INFO] [VFS] ✅ [16/20] core/core-splashes-medium/1 (3.6 MB)
+2026-03-24T10:31:57.188Z [LOG] [INFO] [VFS] 📦 Asset: core/core-splashes-small/0 (2696 bytes) → 8 paths
+2026-03-24T10:31:57.190Z [LOG] [INFO] [VFS] ✅ [17/20] core/core-splashes-small/0 (0.0 MB)
+2026-03-24T10:31:58.190Z [LOG] [INFO] [VFS] 📦 Asset: core/core-splashes-small/1 (1952114 bytes) → 8 paths
+2026-03-24T10:31:58.192Z [LOG] [INFO] [VFS] ✅ [18/20] core/core-splashes-small/1 (1.9 MB)
+2026-03-24T10:31:58.348Z [LOG] [INFO] [VFS] 📦 Asset: audio/res-audio/0 (4135 bytes) → 8 paths
+2026-03-24T10:31:58.350Z [LOG] [INFO] [VFS] ✅ [19/20] audio/res-audio/0 (0.0 MB)
+2026-03-24T10:31:59.398Z [LOG] [INFO] [VFS] 📦 Asset: audio/res-audio/1 (2174750 bytes) → 8 paths
+2026-03-24T10:31:59.399Z [LOG] [INFO] [VFS] ✅ [20/20] audio/res-audio/1 (2.1 MB)
+2026-03-24T10:31:59.400Z [LOG] [INFO] [VFS] 🎮 Assets loaded: 20/20 (27.1 MB total, 0 failed)
+2026-03-24T10:31:59.401Z [LOG] [INFO] [VFS] 📊 Total VFS files registered: 179
+2026-03-24T10:31:59.403Z [LOG] [✅] 🎮 VFS fully loaded: 20 assets, 179 total paths
+2026-03-24T10:31:59.404Z [LOG] [INFO] 📡 Initializing DLC loader...
+2026-03-24T10:31:59.405Z [LOG] [INFO] [DLC] DLC Loader v1.0 initialized
+2026-03-24T10:31:59.407Z [LOG] [INFO] [DLC] Loading DLC manifest...
+2026-03-24T10:32:00.031Z [LOG] [✅] [DLC] Manifest loaded: 4814 dirs, 5051 packages
+2026-03-24T10:32:00.035Z [LOG] [✅] Engine loaded! Running init sequence...
+2026-03-24T10:32:00.037Z [LOG] [INFO] 🔄 Init attempt 1/11
+2026-03-24T10:32:00.038Z [LOG] [INFO] === Running initialization sequence (v15.5 — SharedPrefs + std::string + flag fix) ===
+2026-03-24T10:32:00.039Z [LOG] [INFO] Step 1/8: JNI_OnLoad
+2026-03-24T10:32:00.040Z [LOG] [ARM] Calling JNI_OnLoad at offset 0x11b5f4c...
+2026-03-24T10:32:00.058Z [LOG] [JNI] [JNI] VM.GetEnv: version=0x10002
+2026-03-24T10:32:00.060Z [LOG] [JNI] [JNI] FindClass:  → 0xd0020100
+2026-03-24T10:32:00.061Z [LOG] [JNI] [JNI] NewGlobalRef: 0xd0020100
+2026-03-24T10:32:00.082Z [LOG] [JNI] [JNI] VM.GetEnv: version=0x10002
+2026-03-24T10:32:00.083Z [LOG] [JNI] [JNI] FindClass: com/ea/simpsons/ScorpioJNI → 0xd0020110
+2026-03-24T10:32:00.084Z [LOG] [JNI] [JNI] NewGlobalRef: 0xd0020110
+2026-03-24T10:32:00.092Z [LOG] [JNI] [JNI] VM.GetEnv: version=0x10002
+2026-03-24T10:32:00.096Z [LOG] [JNI] [JNI] FindClass: com/bight/android/jni/JNIInterface → 0xd0020120
+2026-03-24T10:32:00.097Z [LOG] [JNI] [JNI] NewGlobalRef: 0xd0020120
+2026-03-24T10:32:00.110Z [LOG] [JNI] [JNI] VM.GetEnv: version=0x10002
+2026-03-24T10:32:00.111Z [LOG] [JNI] [JNI] FindClass: com/ea/simpsons/Telemetry → 0xd0020130
+2026-03-24T10:32:00.112Z [LOG] [JNI] [JNI] NewGlobalRef: 0xd0020130
+2026-03-24T10:32:00.120Z [LOG] [JNI] [JNI] VM.GetEnv: version=0x10002
+2026-03-24T10:32:00.122Z [LOG] [JNI] [JNI] FindClass: com/ea/simpsons/AppCenterJava → 0xd0020140
+2026-03-24T10:32:00.124Z [LOG] [JNI] [JNI] NewGlobalRef: 0xd0020140
+2026-03-24T10:32:00.132Z [LOG] [JNI] [JNI] VM.GetEnv: version=0x10002
+2026-03-24T10:32:00.134Z [LOG] [JNI] [JNI] FindClass: com/ea/simpsons/mtx/SkuDetails → 0xd0020150
+2026-03-24T10:32:00.135Z [LOG] [JNI] [JNI] NewGlobalRef: 0xd0020150
+2026-03-24T10:32:00.137Z [LOG] [JNI] [JNI] VM.GetEnv: version=0x10002
+2026-03-24T10:32:00.138Z [LOG] [JNI] [JNI] FindClass: com/ea/simpsons/facebook/AndroidFacebookManager → 0xd0020160
+2026-03-24T10:32:00.139Z [LOG] [JNI] [JNI] NewGlobalRef: 0xd0020160
+2026-03-24T10:32:00.141Z [LOG] [JNI] [JNI] VM.GetEnv: version=0x10002
+2026-03-24T10:32:00.142Z [LOG] [JNI] [JNI] FindClass: com/ea/simpsons/NetworkStatus → 0xd0020170
+2026-03-24T10:32:00.143Z [LOG] [JNI] [JNI] NewGlobalRef: 0xd0020170
+2026-03-24T10:32:00.146Z [LOG] [✅] JNI_OnLoad: 5452 instructions, R0=0x10002
+2026-03-24T10:32:00.147Z [LOG] [INFO] Step 2/9: BGCoreJNIBridge.init
+2026-03-24T10:32:00.148Z [LOG] [JNI] prepareBGCoreInit: screen 44x720, info object at 0xd0040000
+2026-03-24T10:32:00.149Z [LOG] [ARM] Calling Java_com_bight_android_jni_BGCoreJNIBridge_init at offset 0x1362c6c...
+2026-03-24T10:32:00.151Z [LOG] [JNI] [JNI] FindClass: àïðea/simps¹	 → 0xd0020180
+2026-03-24T10:32:00.152Z [LOG] [JNI] [JNI] GetMethodID: <init>()V → 0xd0020200
+2026-03-24T10:32:00.153Z [LOG] [JNI] [JNI] NewGlobalRef: 0xd0021000
+2026-03-24T10:32:00.161Z [LOG] [INFO] [Android:ScorpioC] 	Bight Games Core Library
+	Copyright Bight Games 2006-2011
+	v. %d.%d.%d.%d (%d-bit %s)
+
+	Proprietary Technology, not for external use
+
+2026-03-24T10:32:00.171Z [LOG] [✅] Java_com_bight_android_jni_BGCoreJNIBridge_init: 328 instructions, R0=0x7ef3235f
+2026-03-24T10:32:00.173Z [LOG] [INFO] Step 3/9: ScorpioJNI.init
+2026-03-24T10:32:00.174Z [LOG] [ARM] Calling Java_com_ea_simpsons_ScorpioJNI_init at offset 0x11b66a0...
+2026-03-24T10:32:00.178Z [LOG] [JNI] [JNI] GetStringUTFChars: "" → 0xc0000170
+2026-03-24T10:32:00.184Z [LOG] [JNI] [JNI] VM.GetEnv: version=0x10002
+2026-03-24T10:32:00.189Z [LOG] [JNI] [JNI] GetStaticMethodID: getSharedPreference(Ljava/lang/String;)Ljava/lang/String; → 0xd0020210
+2026-03-24T10:32:00.190Z [LOG] [JNI] [JNI] NewStringUTF: "bundleID" → 0xd00300b0
+2026-03-24T10:32:00.193Z [LOG] [JNI] [JNI] CallStaticObjectMethod: getSharedPreference(Ljava/lang/String;)Ljava/lang/String;
+2026-03-24T10:32:00.194Z [LOG] [JNI] [JNI] CallMethod→String: getSharedPreference("bundleID") → "com.ea.game.simpsons4_row"
+2026-03-24T10:32:00.195Z [LOG] [JNI] [JNI] GetStringUTFChars: "com.ea.game.simpsons4_row" → 0xc0000179
+2026-03-24T10:32:00.201Z [LOG] [JNI] [JNI] VM.GetEnv: version=0x10002
+2026-03-24T10:32:00.206Z [LOG] [JNI] [JNI] GetStaticMethodID: getSharedPreference(Ljava/lang/String;)Ljava/lang/String; → 0xd0020210
+2026-03-24T10:32:00.208Z [LOG] [JNI] [JNI] NewStringUTF: "MHClientVersion" → 0xd00300d0
+2026-03-24T10:32:00.209Z [LOG] [JNI] [JNI] CallStaticObjectMethod: getSharedPreference(Ljava/lang/String;)Ljava/lang/String;
+2026-03-24T10:32:00.217Z [LOG] [JNI] [JNI] CallMethod→String: getSharedPreference("MHClientVersion") → "4.65.5"
+2026-03-24T10:32:00.219Z [LOG] [JNI] [JNI] GetStringUTFChars: "4.65.5" → 0xc000019b
+2026-03-24T10:32:00.221Z [LOG] [JNI] [JNI] VM.GetEnv: version=0x10002
+2026-03-24T10:32:00.223Z [LOG] [JNI] [JNI] GetStaticMethodID: getSharedPreference(Ljava/lang/String;)Ljava/lang/String; → 0xd0020210
+2026-03-24T10:32:00.224Z [LOG] [JNI] [JNI] NewStringUTF: "SellId" → 0xd00300f0
+2026-03-24T10:32:00.225Z [LOG] [JNI] [JNI] CallStaticObjectMethod: getSharedPreference(Ljava/lang/String;)Ljava/lang/String;
+2026-03-24T10:32:00.225Z [LOG] [JNI] [JNI] CallMethod→String: getSharedPreference("SellId") → "859"
+2026-03-24T10:32:00.226Z [LOG] [JNI] [JNI] GetStringUTFChars: "859" → 0xc00001aa
+2026-03-24T10:32:00.228Z [LOG] [JNI] [JNI] VM.GetEnv: version=0x10002
+2026-03-24T10:32:00.229Z [LOG] [JNI] [JNI] GetStaticMethodID: getSharedPreference(Ljava/lang/String;)Ljava/lang/String; → 0xd0020210
+2026-03-24T10:32:00.230Z [LOG] [JNI] [JNI] NewStringUTF: "ServerEnvironment" → 0xd0030110
+2026-03-24T10:32:00.231Z [LOG] [JNI] [JNI] CallStaticObjectMethod: getSharedPreference(Ljava/lang/String;)Ljava/lang/String;
+2026-03-24T10:32:00.232Z [LOG] [JNI] [JNI] CallMethod→String: getSharedPreference("ServerEnvironment") → "prod"
+2026-03-24T10:32:00.233Z [LOG] [JNI] [JNI] GetStringUTFChars: "prod" → 0xc00001b6
+2026-03-24T10:32:00.235Z [LOG] [JNI] [JNI] VM.GetEnv: version=0x10002
+2026-03-24T10:32:00.236Z [LOG] [JNI] [JNI] GetStaticMethodID: getSharedPreference(Ljava/lang/String;)Ljava/lang/String; → 0xd0020210
+2026-03-24T10:32:00.237Z [LOG] [JNI] [JNI] NewStringUTF: "Region" → 0xd0030130
+2026-03-24T10:32:00.238Z [LOG] [JNI] [JNI] CallStaticObjectMethod: getSharedPreference(Ljava/lang/String;)Ljava/lang/String;
+2026-03-24T10:32:00.239Z [LOG] [JNI] [JNI] CallMethod→String: getSharedPreference("Region") → "row"
+2026-03-24T10:32:00.240Z [LOG] [JNI] [JNI] GetStringUTFChars: "row" → 0xc00001c3
+2026-03-24T10:32:00.242Z [LOG] [JNI] [JNI] VM.GetEnv: version=0x10002
+2026-03-24T10:32:00.243Z [LOG] [JNI] [JNI] GetStaticMethodID: getSharedPreference(Ljava/lang/String;)Ljava/lang/String; → 0xd0020210
+2026-03-24T10:32:00.244Z [LOG] [JNI] [JNI] NewStringUTF: "DebugMenuOnStart" → 0xd0030150
+2026-03-24T10:32:00.245Z [LOG] [JNI] [JNI] CallStaticObjectMethod: getSharedPreference(Ljava/lang/String;)Ljava/lang/String;
+2026-03-24T10:32:00.246Z [LOG] [JNI] [JNI] CallMethod→String: getSharedPreference("DebugMenuOnStart") → "0"
+2026-03-24T10:32:00.247Z [LOG] [JNI] [JNI] GetStringUTFChars: "0" → 0xc00001cf
+2026-03-24T10:32:00.250Z [LOG] [JNI] [JNI] VM.GetEnv: version=0x10002
+2026-03-24T10:32:00.252Z [LOG] [JNI] [JNI] GetStaticMethodID: getSharedPreference(Ljava/lang/String;)Ljava/lang/String; → 0xd0020210
+2026-03-24T10:32:00.253Z [LOG] [JNI] [JNI] NewStringUTF: "LandDataVersion" → 0xd0030170
+2026-03-24T10:32:00.254Z [LOG] [JNI] [JNI] CallStaticObjectMethod: getSharedPreference(Ljava/lang/String;)Ljava/lang/String;
+2026-03-24T10:32:00.255Z [LOG] [JNI] [JNI] CallMethod→String: getSharedPreference("LandDataVersion") → "4.65.5"
+2026-03-24T10:32:00.256Z [LOG] [JNI] [JNI] GetStringUTFChars: "4.65.5" → 0xc00001d9
+2026-03-24T10:32:00.259Z [LOG] [JNI] [JNI] VM.GetEnv: version=0x10002
+2026-03-24T10:32:00.260Z [LOG] [JNI] [JNI] GetStaticMethodID: getSharedPreference(Ljava/lang/String;)Ljava/lang/String; → 0xd0020210
+2026-03-24T10:32:00.261Z [LOG] [JNI] [JNI] NewStringUTF: "DLCSource" → 0xd0030190
+2026-03-24T10:32:00.263Z [LOG] [JNI] [JNI] CallStaticObjectMethod: getSharedPreference(Ljava/lang/String;)Ljava/lang/String;
+2026-03-24T10:32:00.264Z [LOG] [JNI] [JNI] CallMethod→String: getSharedPreference("DLCSource") → "dlc"
+2026-03-24T10:32:00.265Z [LOG] [JNI] [JNI] GetStringUTFChars: "dlc" → 0xc00001e8
+2026-03-24T10:32:00.267Z [LOG] [JNI] [JNI] VM.GetEnv: version=0x10002
+2026-03-24T10:32:00.269Z [LOG] [JNI] [JNI] GetStaticMethodID: getSharedPreference(Ljava/lang/String;)Ljava/lang/String; → 0xd0020210
+2026-03-24T10:32:00.270Z [LOG] [JNI] [JNI] NewStringUTF: "DebugMenuDisabled" → 0xd00301b0
+2026-03-24T10:32:00.271Z [LOG] [JNI] [JNI] CallStaticObjectMethod: getSharedPreference(Ljava/lang/String;)Ljava/lang/String;
+2026-03-24T10:32:00.272Z [LOG] [JNI] [JNI] CallMethod→String: getSharedPreference("DebugMenuDisabled") → "1"
+2026-03-24T10:32:00.274Z [LOG] [JNI] [JNI] GetStringUTFChars: "1" → 0xc00001f4
+2026-03-24T10:32:00.278Z [LOG] [JNI] [JNI] VM.GetEnv: version=0x10002
+2026-03-24T10:32:00.279Z [LOG] [JNI] [JNI] GetStaticMethodID: getSharedPreference(Ljava/lang/String;)Ljava/lang/String; → 0xd0020210
+2026-03-24T10:32:00.281Z [LOG] [JNI] [JNI] NewStringUTF: "ShowVersionsInAbout" → 0xd00301d0
+2026-03-24T10:32:00.282Z [LOG] [JNI] [JNI] CallStaticObjectMethod: getSharedPreference(Ljava/lang/String;)Ljava/lang/String;
+2026-03-24T10:32:00.283Z [LOG] [JNI] [JNI] CallMethod→String: getSharedPreference("ShowVersionsInAbout") → "0"
+2026-03-24T10:32:00.284Z [LOG] [JNI] [JNI] GetStringUTFChars: "0" → 0xc00001fe
+2026-03-24T10:32:00.286Z [LOG] [JNI] [JNI] VM.GetEnv: version=0x10002
+2026-03-24T10:32:00.288Z [LOG] [JNI] [JNI] GetStaticMethodID: getSharedPreference(Ljava/lang/String;)Ljava/lang/String; → 0xd0020210
+2026-03-24T10:32:00.289Z [LOG] [JNI] [JNI] NewStringUTF: "ServerErrorReason" → 0xd00301f0
+2026-03-24T10:32:00.290Z [LOG] [JNI] [JNI] CallStaticObjectMethod: getSharedPreference(Ljava/lang/String;)Ljava/lang/String;
+2026-03-24T10:32:00.291Z [LOG] [JNI] [JNI] CallMethod→String: getSharedPreference("ServerErrorReason") → ""
+2026-03-24T10:32:00.292Z [LOG] [JNI] [JNI] GetStringUTFChars: "" → 0xc0000208
+2026-03-24T10:32:00.295Z [LOG] [JNI] [JNI] VM.GetEnv: version=0x10002
+2026-03-24T10:32:00.297Z [LOG] [JNI] [JNI] GetStaticMethodID: getSharedPreference(Ljava/lang/String;)Ljava/lang/String; → 0xd0020210
+2026-03-24T10:32:00.298Z [LOG] [JNI] [JNI] NewStringUTF: "DLCLocation" → 0xd0030210
+2026-03-24T10:32:00.299Z [LOG] [JNI] [JNI] CallStaticObjectMethod: getSharedPreference(Ljava/lang/String;)Ljava/lang/String;
+2026-03-24T10:32:00.300Z [LOG] [JNI] [JNI] CallMethod→String: getSharedPreference("DLCLocation") → "/data/data/com.ea.game.simpsons4_row/files/"
+2026-03-24T10:32:00.301Z [LOG] [JNI] [JNI] GetStringUTFChars: "/data/data/com.ea.game.simpsons4_row/files/" → 0xc0000211
+2026-03-24T10:32:00.303Z [LOG] [JNI] [JNI] VM.GetEnv: (further calls suppressed)
+2026-03-24T10:32:00.304Z [LOG] [JNI] [JNI] GetStaticMethodID: getSharedPreference(Ljava/lang/String;)Ljava/lang/String; → 0xd0020210
+2026-03-24T10:32:00.305Z [LOG] [JNI] [JNI] NewStringUTF: "TntGameId" → 0xd0030230
+2026-03-24T10:32:00.306Z [LOG] [JNI] [JNI] CallStaticObjectMethod: getSharedPreference(Ljava/lang/String;)Ljava/lang/String;
+2026-03-24T10:32:00.307Z [LOG] [JNI] [JNI] CallMethod→String: getSharedPreference("TntGameId") → "simpsons4"
+2026-03-24T10:32:00.308Z [LOG] [JNI] [JNI] GetStringUTFChars: "simpsons4" → 0xc0000245
+2026-03-24T10:32:00.310Z [LOG] [JNI] [JNI] GetStaticMethodID: getSharedPreference(Ljava/lang/String;)Ljava/lang/String; → 0xd0020210
+2026-03-24T10:32:00.311Z [LOG] [JNI] [JNI] NewStringUTF: "SubPlatform" → 0xd0030250
+2026-03-24T10:32:00.312Z [LOG] [JNI] [JNI] CallStaticObjectMethod: getSharedPreference(Ljava/lang/String;)Ljava/lang/String;
+2026-03-24T10:32:00.313Z [LOG] [JNI] [JNI] CallMethod→String: getSharedPreference("SubPlatform") → "android"
+2026-03-24T10:32:00.314Z [LOG] [JNI] [JNI] GetStringUTFChars: "android" → 0xc0000257
+2026-03-24T10:32:00.317Z [LOG] [JNI] [JNI] GetStaticMethodID: getSharedPreference(Ljava/lang/String;)Ljava/lang/String; → 0xd0020210
+2026-03-24T10:32:00.318Z [LOG] [JNI] [JNI] NewStringUTF: "DLCSecretKey" → 0xd0030270
+2026-03-24T10:32:00.319Z [LOG] [JNI] [JNI] CallStaticObjectMethod: getSharedPreference(Ljava/lang/String;)Ljava/lang/String;
+2026-03-24T10:32:00.320Z [LOG] [JNI] [JNI] CallMethod→String: getSharedPreference("DLCSecretKey") → "tapped_out_secret_key_2013"
+2026-03-24T10:32:00.321Z [LOG] [JNI] [JNI] GetStringUTFChars: "tapped_out_secret_key_2013" → 0xc0000267
+2026-03-24T10:32:00.323Z [LOG] [JNI] [JNI] GetStaticMethodID: getSharedPreference(Ljava/lang/String;)Ljava/lang/String; → 0xd0020210
+2026-03-24T10:32:00.324Z [LOG] [JNI] [JNI] NewStringUTF: "CustomConfigBasicAuth" → 0xd0030290
+2026-03-24T10:32:00.325Z [LOG] [JNI] [JNI] CallStaticObjectMethod: getSharedPreference(Ljava/lang/String;)Ljava/lang/String;
+2026-03-24T10:32:00.326Z [LOG] [JNI] [JNI] CallMethod→String: getSharedPreference("CustomConfigBasicAuth") → ""
+2026-03-24T10:32:00.327Z [LOG] [JNI] [JNI] GetStringUTFChars: "" → 0xc000028a
+2026-03-24T10:32:00.331Z [LOG] [JNI] [JNI] GetStaticMethodID: getSharedPreference(Ljava/lang/String;)Ljava/lang/String; → 0xd0020210
+2026-03-24T10:32:00.332Z [LOG] [JNI] [JNI] NewStringUTF: "CustomClientConfigEnabled" → 0xd00302b0
+2026-03-24T10:32:00.333Z [LOG] [JNI] [JNI] CallStaticObjectMethod: getSharedPreference(Ljava/lang/String;)Ljava/lang/String;
+2026-03-24T10:32:00.334Z [LOG] [JNI] [JNI] CallMethod→String: getSharedPreference("CustomClientConfigEnabled") → "0"
+2026-03-24T10:32:00.335Z [LOG] [JNI] [JNI] GetStringUTFChars: "0" → 0xc0000293
+2026-03-24T10:32:00.337Z [LOG] [JNI] [JNI] GetStaticMethodID: getSharedPreference(Ljava/lang/String;)Ljava/lang/String; → 0xd0020210
+2026-03-24T10:32:00.339Z [LOG] [JNI] [JNI] NewStringUTF: "CustomGameplayConfigEnabled" → 0xd00302d0
+2026-03-24T10:32:00.339Z [LOG] [JNI] [JNI] CallStaticObjectMethod: getSharedPreference(Ljava/lang/String;)Ljava/lang/String;
+2026-03-24T10:32:00.340Z [LOG] [JNI] [JNI] CallMethod→String: getSharedPreference("CustomGameplayConfigEnabled") → "0"
+2026-03-24T10:32:00.341Z [LOG] [JNI] [JNI] GetStringUTFChars: "0" → 0xc000029d
+2026-03-24T10:32:00.344Z [LOG] [JNI] [JNI] GetStaticMethodID: getSharedPreference(Ljava/lang/String;)Ljava/lang/String; → 0xd0020210
+2026-03-24T10:32:00.345Z [LOG] [JNI] [JNI] NewStringUTF: "CustomClientConfigFileName" → 0xd00302f0
+2026-03-24T10:32:00.346Z [LOG] [JNI] [JNI] CallStaticObjectMethod: getSharedPreference(Ljava/lang/String;)Ljava/lang/String;
+2026-03-24T10:32:00.347Z [LOG] [JNI] [JNI] CallMethod→String: getSharedPreference("CustomClientConfigFileName") → ""
+2026-03-24T10:32:00.348Z [LOG] [JNI] [JNI] GetStringUTFChars: "" → 0xc00002a7
+2026-03-24T10:32:00.351Z [LOG] [JNI] [JNI] GetStaticMethodID: getSharedPreference(Ljava/lang/String;)Ljava/lang/String; → 0xd0020210
+2026-03-24T10:32:00.352Z [LOG] [JNI] [JNI] NewStringUTF: "CustomGameplayConfigFileName" → 0xd0030310
+2026-03-24T10:32:00.353Z [LOG] [JNI] [JNI] CallStaticObjectMethod: getSharedPreference(Ljava/lang/String;)Ljava/lang/String;
+2026-03-24T10:32:00.354Z [LOG] [JNI] [JNI] CallMethod→String: getSharedPreference("CustomGameplayConfigFileName") → ""
+2026-03-24T10:32:00.355Z [LOG] [JNI] [JNI] GetStringUTFChars: (further calls suppressed)
+2026-03-24T10:32:00.359Z [LOG] [JNI] [JNI] GetStaticMethodID: (further calls suppressed)
+2026-03-24T10:32:00.360Z [LOG] [JNI] [JNI] NewStringUTF: (further calls suppressed)
+2026-03-24T10:32:00.361Z [LOG] [JNI] [JNI] CallMethod→String: (further calls suppressed)
+2026-03-24T10:32:00.376Z [LOG] [✅] Java_com_ea_simpsons_ScorpioJNI_init: 17180 instructions, R0=0x0
+2026-03-24T10:32:00.378Z [LOG] [✅] v18: Pre-allocated BGCore object at 0xd0101550 (vtable at 0xd0101750) → singleton+0x1AC
+2026-03-24T10:32:00.379Z [LOG] [INFO] Step 4/9: OGLESInit
+2026-03-24T10:32:00.380Z [LOG] [ARM] Calling Java_com_bight_android_jni_BGCoreJNIBridge_OGLESInit at offset 0x1363c24...
+2026-03-24T10:32:00.405Z [LOG] [ERR] [MEM] FETCH below BASE at 0x4000 — NULL function pointer! PC=0x4000 LR=0xe00ff000 R0=0xd0101850
+2026-03-24T10:32:00.408Z [LOG] [✅] Java_com_bight_android_jni_BGCoreJNIBridge_OGLESInit: 4390 instructions, R0=0xd0101850
+2026-03-24T10:32:00.409Z [LOG] [INFO] Step 5/9: OGLESResize
+2026-03-24T10:32:00.410Z [LOG] [ARM] Calling Java_com_bight_android_jni_BGCoreJNIBridge_OGLESResize at offset 0x1363ccc...
+2026-03-24T10:32:00.432Z [LOG] [ERR] [MEM] FETCH below BASE at 0x4000 — NULL function pointer! PC=0x4000 LR=0xe00ff000 R0=0x0
+2026-03-24T10:32:00.435Z [LOG] [✅] Java_com_bight_android_jni_BGCoreJNIBridge_OGLESResize: 4127 instructions, R0=0x0
+2026-03-24T10:32:00.436Z [LOG] [INFO] Step 6/9: Lifecycle.onCreate
+2026-03-24T10:32:00.437Z [LOG] [ARM] Calling Java_com_ea_simpsons_ScorpioJNI_LifecycleOnCreate at offset 0x11b6c70...
+2026-03-24T10:32:00.439Z [LOG] [✅] Java_com_ea_simpsons_ScorpioJNI_LifecycleOnCreate: 141 instructions, R0=0x8f5d689f
+2026-03-24T10:32:00.440Z [LOG] [INFO] Step 7/9: Lifecycle.Start
+2026-03-24T10:32:00.441Z [LOG] [ARM] Calling Java_com_ea_simpsons_ScorpioJNI_LifecycleStart at offset 0x11b6da8...
+2026-03-24T10:32:00.447Z [LOG] [WARN] [STUB] Generic return from LR=0x1135e4a8 (offset 0x135e4a8) R0=0xd0000000 R1=0xd0020100
+2026-03-24T10:32:01.022Z [LOG] [INFO] [VFS] ✅ fopen: (null)/core/res-core/0 → fd=100 (1487 bytes)
+2026-03-24T10:32:01.047Z [LOG] [✅] Java_com_ea_simpsons_ScorpioJNI_LifecycleStart: 848122 instructions, R0=0x0
+2026-03-24T10:32:01.048Z [LOG] [INFO] Step 8/9: Lifecycle.Resume
+2026-03-24T10:32:01.049Z [LOG] [ARM] Calling Java_com_ea_simpsons_ScorpioJNI_LifecycleResume at offset 0x11b6efc...
+2026-03-24T10:32:01.057Z [LOG] [✅] Java_com_ea_simpsons_ScorpioJNI_LifecycleResume: 1588 instructions, R0=0xb42bb5ff
+2026-03-24T10:32:01.057Z [LOG] [ARM] Calling Java_com_bight_android_jni_BGCoreJNIBridge_resume at offset 0x1362e58...
+2026-03-24T10:32:01.059Z [LOG] [✅] Java_com_bight_android_jni_BGCoreJNIBridge_resume: 26 instructions, R0=0x0
+2026-03-24T10:32:01.060Z [LOG] [✅] v13.2: Forced render-ready flag at singleton (0xd01002f0+0xD1B) — saved for restoration
+2026-03-24T10:32:01.061Z [LOG] [✅] v18: Set engine-running flag at 0x11a466a8 (enables real render path)
+2026-03-24T10:32:01.062Z [LOG] [✅] Initialization complete: 9/9 steps OK
+2026-03-24T10:32:01.090Z [LOG] [INFO] Total ARM instructions in init: 881 354
+2026-03-24T10:32:01.091Z [LOG] [INFO] Cumulative instructions: 881 354
+2026-03-24T10:32:01.092Z [LOG] [INFO] Auto-mapped regions: 3
+2026-03-24T10:32:01.093Z [LOG] [WARN] Unmapped memory accesses (first 5):
+2026-03-24T10:32:01.094Z [LOG] [WARN]   read addr=0x197bcf0 size=4 PC=0x111b5f74
+2026-03-24T10:32:01.095Z [LOG] [WARN]   read addr=0x9c size=4 PC=0x111b29f8
+2026-03-24T10:32:01.095Z [LOG] [WARN]   fetch addr=0x4000 size=1 PC=0x4000
+2026-03-24T10:32:01.097Z [LOG] [WARN]   write addr=0xfe010c0 size=4 PC=0x119e60f0
+2026-03-24T10:32:01.098Z [LOG] [INFO] Generic return stub called from 1 unique callers:
+2026-03-24T10:32:01.099Z [LOG] [INFO]   LR=0x1135e4a8 (offset 0x135e4a8) x1
+2026-03-24T10:32:01.100Z [LOG] [INFO] JNI stats: 9 classes, 7 methods, 55 strings, 0 registered natives
+2026-03-24T10:32:01.101Z [LOG] [INFO] VFS stats: 179 files, 1 opens, 0 reads, 0.0KB read, 0 misses
+2026-03-24T10:32:01.102Z [LOG] [INFO] [DLC] ✅ No VFS misses — init clean!
+2026-03-24T10:32:01.106Z [LOG] [✅] 🍩 Engine initialized! Ready to run.
+2026-03-24T10:32:01.107Z [LOG] [INFO] 🔧 Loading game shaders from APK assets...
+2026-03-24T10:32:01.169Z [LOG] [SHADER] ✅ Loaded 2DShader.vsh (980 chars)
+2026-03-24T10:32:01.220Z [LOG] [SHADER] ✅ Loaded 2DShader.fsh (1631 chars)
+2026-03-24T10:32:01.269Z [LOG] [SHADER] ✅ Loaded UberShader.vsh (973 chars)
+2026-03-24T10:32:01.330Z [LOG] [SHADER] ✅ Loaded UberShader.fsh (2001 chars)
+2026-03-24T10:32:01.330Z [LOG] [SHADER] 📦 All 4 shader sources loaded from APK assets
+2026-03-24T10:32:01.332Z [LOG] [SHADER] 🔨 Compiling shader variants...
+2026-03-24T10:32:01.350Z [LOG] [SHADER] ✅ 2D-VertexColor: attribs=[position,colourRGBA] uniforms=[matWorldViewProj]
+2026-03-24T10:32:01.371Z [LOG] [SHADER] ✅ 2D-Textured: attribs=[position,uvs] uniforms=[matWorldViewProj,diffuseTexture]
+2026-03-24T10:32:01.380Z [LOG] [SHADER] ✅ 2D-TexturedVertexColor compiled
+2026-03-24T10:32:01.393Z [LOG] [SHADER] ✅ 2D-UniformColor compiled
+2026-03-24T10:32:01.406Z [LOG] [SHADER] ✅ Uber-VertexColor compiled
+2026-03-24T10:32:01.418Z [LOG] [SHADER] ✅ Uber-Textured compiled
+2026-03-24T10:32:01.431Z [LOG] [SHADER] ✅ Uber-Full compiled
+2026-03-24T10:32:01.431Z [LOG] [SHADER] 🎮 7 shader variants compiled successfully!
+2026-03-24T10:32:01.439Z [LOG] [SHADER] 🎨 Test geometry created: 129 vertices (Springfield scene)
+2026-03-24T10:32:01.447Z [LOG] [✅] 🎮 Game shaders compiled! Test rendering enabled.
+2026-03-24T10:32:03.479Z [LOG] [INFO] ▶ Game loop started
+2026-03-24T10:32:03.481Z [LOG] [ARM] Calling Java_com_bight_android_jni_BGCoreJNIBridge_OGLESRender at offset 0x1363d3c...
+2026-03-24T10:32:03.485Z [LOG] [✅] Java_com_bight_android_jni_BGCoreJNIBridge_OGLESRender: 236 instructions, R0=0x0
+2026-03-24T10:32:03.486Z [LOG] [INFO] === Frame 1 function profile (top 30) ===
+2026-03-24T10:32:03.487Z [LOG] [INFO]   5x _ZdlPv
+2026-03-24T10:32:03.488Z [LOG] [INFO]   2x pthread_mutex_destroy
+2026-03-24T10:32:03.489Z [LOG] [INFO]   1x pthread_mutex_lock
+2026-03-24T10:32:03.490Z [LOG] [INFO]   1x pthread_mutex_unlock
+2026-03-24T10:32:03.491Z [LOG] [INFO]   1x _ZdaPv
+2026-03-24T10:32:03.492Z [LOG] [INFO]   1x VM.GetEnv
+2026-03-24T10:32:03.494Z [LOG] [INFO]   1x JNI.NewStringUTF
+2026-03-24T10:32:03.495Z [LOG] [INFO]   1x JNI.GetObjectClass
+2026-03-24T10:32:03.496Z [LOG] [INFO]   1x JNI.GetStaticMethodID
+2026-03-24T10:32:03.497Z [LOG] [INFO]   1x JNI.CallStaticVoidMethodV
+2026-03-24T10:32:03.498Z [LOG] [INFO]   Total unique functions: 10
+2026-03-24T10:32:03.499Z [LOG] [INFO]   VFS: 1 opens, 0 reads, 0.0KB read, 0 misses
+2026-03-24T10:32:03.509Z [LOG] [ARM] Calling Java_com_bight_android_jni_BGCoreJNIBridge_OGLESRender at offset 0x1363d3c...
+2026-03-24T10:32:03.512Z [LOG] [✅] Java_com_bight_android_jni_BGCoreJNIBridge_OGLESRender: 206 instructions, R0=0x0
+2026-03-24T10:32:03.513Z [LOG] [INFO] === Frame 2 function profile (top 30) ===
+2026-03-24T10:32:03.514Z [LOG] [INFO]   3x _ZdlPv
+2026-03-24T10:32:03.515Z [LOG] [INFO]   2x pthread_mutex_destroy
+2026-03-24T10:32:03.516Z [LOG] [INFO]   1x pthread_mutex_lock
+2026-03-24T10:32:03.517Z [LOG] [INFO]   1x pthread_mutex_unlock
+2026-03-24T10:32:03.517Z [LOG] [INFO]   1x VM.GetEnv
+2026-03-24T10:32:03.518Z [LOG] [INFO]   1x JNI.NewStringUTF
+2026-03-24T10:32:03.519Z [LOG] [INFO]   1x JNI.GetObjectClass
+2026-03-24T10:32:03.520Z [LOG] [INFO]   1x JNI.GetStaticMethodID
+2026-03-24T10:32:03.521Z [LOG] [INFO]   1x JNI.CallStaticVoidMethodV
+2026-03-24T10:32:03.522Z [LOG] [INFO]   Total unique functions: 9
+2026-03-24T10:32:03.523Z [LOG] [INFO]   VFS: 1 opens, 0 reads, 0.0KB read, 0 misses
+2026-03-24T10:32:03.526Z [LOG] [ARM] Calling Java_com_bight_android_jni_BGCoreJNIBridge_OGLESRender at offset 0x1363d3c...
+2026-03-24T10:32:03.529Z [LOG] [✅] Java_com_bight_android_jni_BGCoreJNIBridge_OGLESRender: 206 instructions, R0=0x0
+2026-03-24T10:32:03.530Z [LOG] [INFO] === Frame 3 function profile (top 30) ===
+2026-03-24T10:32:03.531Z [LOG] [INFO]   3x _ZdlPv
+2026-03-24T10:32:03.533Z [LOG] [INFO]   2x pthread_mutex_destroy
+2026-03-24T10:32:03.534Z [LOG] [INFO]   1x pthread_mutex_lock
+2026-03-24T10:32:03.535Z [LOG] [INFO]   1x pthread_mutex_unlock
+2026-03-24T10:32:03.536Z [LOG] [INFO]   1x VM.GetEnv
+2026-03-24T10:32:03.537Z [LOG] [INFO]   1x JNI.NewStringUTF
+2026-03-24T10:32:03.539Z [LOG] [INFO]   1x JNI.GetObjectClass
+2026-03-24T10:32:03.540Z [LOG] [INFO]   1x JNI.GetStaticMethodID
+2026-03-24T10:32:03.542Z [LOG] [INFO]   1x JNI.CallStaticVoidMethodV
+2026-03-24T10:32:03.543Z [LOG] [INFO]   Total unique functions: 9
+2026-03-24T10:32:03.545Z [LOG] [INFO]   VFS: 1 opens, 0 reads, 0.0KB read, 0 misses
+2026-03-24T10:32:03.552Z [LOG] [ARM] Calling Java_com_bight_android_jni_BGCoreJNIBridge_OGLESRender at offset 0x1363d3c...
+2026-03-24T10:32:03.555Z [LOG] [✅] Java_com_bight_android_jni_BGCoreJNIBridge_OGLESRender: 206 instructions, R0=0x0
+2026-03-24T10:32:03.568Z [LOG] [ARM] Calling Java_com_bight_android_jni_BGCoreJNIBridge_OGLESRender at offset 0x1363d3c...
