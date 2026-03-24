@@ -921,11 +921,13 @@ class ScorpioEngine {
             this.emu.mem_write(singletonPtr + 0xD1C, [1]); // 1 = ENTER render body (BNE path)
             Logger.success('v22: engine-init=1, error=0, D1C=1 (render body ENABLED)');
 
-            // v21: engine flag=0, D1B=0 routes through OGLESRender to real render fn
-            // Gate checks at 0x12C36B4/0x12C36C0 are NOP'd as safety net
+            // v22 FIX: The byte at VA 0x1A466A8 controls OGLESRender's render path:
+            //   0 = normal (needs scene graph) → skip loading render → empty black
+            //   1 = loading mode → calls loading screen renderer at 0x12C2EF8
+            // Set to 1 so OGLESRender enters loading screen path (splash/progress)
             var GLOBAL_FLAG_ADDR = this.BASE + 0x1A466A8;
-            this.emu.mem_write(GLOBAL_FLAG_ADDR, [0]);
-            Logger.success('v22: engine-flag=0, D1B=0, gate NOPs → direct render bypass ready');
+            this.emu.mem_write(GLOBAL_FLAG_ADDR, [1]);
+            Logger.success('v22: engine-flag=1 (loading mode), D1B=0, D1C=1 → loading screen render path');
         } else {
             Logger.warn('v13.2: Singleton pointer is NULL — render-ready flag NOT set');
         }
@@ -1020,7 +1022,12 @@ class ScorpioEngine {
             if (currentPtr === 0) {
                 this._writeU32ToEmu(SINGLETON_PTR_ADDR, this.savedSingletonPtr);
             }
-            this.emu.mem_write(this.BASE + 0x1A466A8, [0]);     // engine flag = 0
+            // v22 FIX: flag byte at 0x1A466A8 controls OGLESRender path:
+            //   0 = normal render (needs populated scene graph — which we DON'T have)
+            //   1 = loading mode (calls loading screen renderer at 0x12C2EF8)
+            // We were wrongly setting 0 ("normal") but with empty scene = black screen.
+            // Set to 1 to trigger the loading screen render path!
+            this.emu.mem_write(this.BASE + 0x1A466A8, [1]);     // loading mode = show loading screen
             this.emu.mem_write(this.savedSingletonPtr + 0xD1B, [0]); // D1B = 0 → render path
             this.emu.mem_write(this.savedSingletonPtr + 0xD1C, [1]); // D1C = 1 → enter render body (BNE)
             this.emu.mem_write(this.savedSingletonPtr + 4, [1]);     // engine init = 1
@@ -1075,8 +1082,9 @@ class ScorpioEngine {
             this.jni.prepareCall('OGLESRender'));
 
         // v22: Detect early return and bypass via direct call to 0x12C33C0
+        // With flag=1 (loading mode), OGLESRender should run longer (calls loading screen renderer)
         var oglesInsns = frameResult ? frameResult.instructions || 0 : 0;
-        if (oglesInsns < 500 && this.savedSingletonPtr) {
+        if (oglesInsns < 1000 && this.savedSingletonPtr) {
             Logger.warn('[v22] OGLESRender returned early (' + oglesInsns + ' insns) — bypassing to direct render call at 0x12C33C0');
 
             // Analyze the trace to find the early-return branch
@@ -1118,7 +1126,7 @@ class ScorpioEngine {
 
             // === DIRECT RENDER CALL ===
             // Re-force all state flags before direct call
-            this.emu.mem_write(this.BASE + 0x1A466A8, [0]);
+            this.emu.mem_write(this.BASE + 0x1A466A8, [1]); // loading mode
             this.emu.mem_write(this.savedSingletonPtr + 0xD1B, [0]);
             this.emu.mem_write(this.savedSingletonPtr + 0xD1C, [1]); // 1 = enter render body
             this.emu.mem_write(this.savedSingletonPtr + 4, [1]);
