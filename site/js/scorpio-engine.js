@@ -24,9 +24,10 @@ class ScorpioEngine {
         this.SHIM_BASE = 0xE0000000;
         this.SHIM_SIZE = 0x100000;
         this.RETURN_SENTINEL = this.SHIM_BASE + this.SHIM_SIZE - 0x1000; // Dedicated stop address for emu_start
+        this.GENERIC_RETURN = this.SHIM_BASE + this.SHIM_SIZE - 0x2000; // v16: isolated generic return stub
 
         this.shimHandlers = new Map();
-        this._nextShimAddr = this.SHIM_BASE + 8; // +8 because we write 2 instructions at SHIM_BASE
+        this._nextShimAddr = this.SHIM_BASE + 0x100; // v16: skip first 256 bytes (reserved + protected)
 
         // State
         this.initialized = false;
@@ -145,8 +146,10 @@ class ScorpioEngine {
         this.emu.mem_map(this.SHIM_BASE, this.SHIM_SIZE, uc.PROT_ALL);
         this.memMapped += this.SHIM_SIZE;
 
-        // === v12.0: Write "MOV R0, #0; BX LR" at SHIM_BASE ===
-        // Default return stub now returns 0 instead of leaving R0 as-is
+        // === v16: Write generic return stub at GENERIC_RETURN (isolated page) ===
+        // Previously at SHIM_BASE, but ARM code was overwriting it with string data
+        this._writeGenericReturnStub();
+        // Also write a copy at SHIM_BASE as fallback
         this.emu.mem_write(this.SHIM_BASE, [
             0x00, 0x00, 0xA0, 0xE3,  // MOV R0, #0
             0x1E, 0xFF, 0x2F, 0xE1,  // BX LR
@@ -333,7 +336,7 @@ class ScorpioEngine {
                 this._writeU32ToEmu(gotAddr, this._dataSymbolAddrs[rel.symName]);
                 shimmed++;
             } else {
-                this._writeU32ToEmu(gotAddr, this.SHIM_BASE);
+                this._writeU32ToEmu(gotAddr, this.GENERIC_RETURN);
                 genericReturn++;
                 unresolvedList.push(rel.symName);
             }
@@ -370,6 +373,13 @@ class ScorpioEngine {
             (val >> 16) & 0xFF, (val >> 24) & 0xFF,
         ];
         try { this.emu.mem_write(addr, bytes); } catch(e) {}
+    }
+
+    _writeGenericReturnStub() {
+        this.emu.mem_write(this.GENERIC_RETURN, [
+            0x00, 0x00, 0xA0, 0xE3,  // MOV R0, #0
+            0x1E, 0xFF, 0x2F, 0xE1,  // BX LR
+        ]);
     }
 
     _readU32FromEmu(addr) {
@@ -423,13 +433,14 @@ class ScorpioEngine {
                     // v13.2: RETURN_SENTINEL reached — function returned cleanly
                     // emu_start will stop here since this is the stop address
                     Logger.arm('↩ RETURN_SENTINEL reached — function returned cleanly');
-                } else if (addr === self.SHIM_BASE) {
-                    // v12.0: Generic return stub — R0 is set to 0 by the ARM instructions
-                    // (MOV R0, #0; BX LR), so no JS intervention needed.
-                    // Just track callers for debugging.
+                } else if (addr === self.GENERIC_RETURN || addr === self.SHIM_BASE) {
+                    // v16: Generic return stub — R0 is set to 0 by ARM instructions
+                    // (MOV R0, #0; BX LR). Track callers for debugging.
                     var lr = self._readReg(uc.ARM_REG_LR);
                     var count = self._genericReturnCalls.get(lr) || 0;
                     self._genericReturnCalls.set(lr, count + 1);
+                    // v16: Re-write stub in case it was corrupted
+                    self._writeGenericReturnStub();
                 }
             }
         }, self.SHIM_BASE, self.SHIM_BASE + self.SHIM_SIZE);
@@ -568,8 +579,8 @@ class ScorpioEngine {
         var addr = this.BASE + (sym & ~1);
 
         this._writeReg(uc.ARM_REG_SP, this.STACK + this.STACK_SIZE - 0x1000);
-        // v13.4: Always use SHIM_BASE mode - chaotic execution produces GL calls
-        this._writeReg(uc.ARM_REG_LR, this.SHIM_BASE);
+        // v16: LR points to generic return stub (isolated from corruptible SHIM_BASE)
+        this._writeReg(uc.ARM_REG_LR, this.GENERIC_RETURN);
 
         if (args.r0 !== undefined) this._writeReg(uc.ARM_REG_R0, args.r0);
         if (args.r1 !== undefined) this._writeReg(uc.ARM_REG_R1, args.r1);
@@ -809,6 +820,7 @@ class ScorpioEngine {
         }
 
         this._pcSamples = {}; // reset PC sampling for this frame
+        this._writeGenericReturnStub(); // v16: ensure stub is intact before each frame
         var frameResult = this.callFunction('Java_com_bight_android_jni_BGCoreJNIBridge_OGLESRender',
             this.jni.prepareCall('OGLESRender'));
 
