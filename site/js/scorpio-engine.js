@@ -543,12 +543,40 @@ class ScorpioEngine {
     }
 
     _handleUnmapped(type, addr, size) {
-        // v17: Block FETCH below binary BASE — this is a NULL function pointer call
-        // Execution would slide through zero-filled pages forever. Stop it immediately.
+        // v19: NULL function pointer call (FETCH below BASE)
+        // Instead of stopping, simulate "return 0" so execution continues.
+        // This handles uninitialized vtable entries in objects whose constructors
+        // hit missing dependencies. The caller gets R0=0 back and can check for failure.
         if (type === 'fetch' && (addr >>> 0) < this.BASE) {
             var pc = this._readReg(uc.ARM_REG_PC);
             var lr = this._readReg(uc.ARM_REG_LR);
             var r0 = this._readReg(uc.ARM_REG_R0);
+            // Only auto-return if LR looks valid (inside binary or shim space)
+            var lrUnsigned = lr >>> 0;
+            if (lrUnsigned >= this.BASE || (lrUnsigned >= 0xe0000000 && lrUnsigned < 0xf0000000)) {
+                if (!this._nullPtrCount) this._nullPtrCount = 0;
+                this._nullPtrCount++;
+                if (this._nullPtrCount <= 5) {
+                    Logger.warn('[MEM] NULL function ptr at 0x' + (addr>>>0).toString(16) +
+                        ' — auto-return to LR=0x' + lrUnsigned.toString(16) +
+                        ' R0=0x' + (r0>>>0).toString(16));
+                }
+                // Map the page so Unicorn doesn't fault, write a BX LR there
+                var aligned = addr & ~0xFFF;
+                if (!this._autoMapped.has(aligned)) {
+                    try {
+                        this.emu.mem_map(aligned, 0x1000, uc.PROT_ALL);
+                        this._autoMapped.add(aligned);
+                    } catch(e) {}
+                }
+                // Write "MOV R0, #0; BX LR" at the target address
+                // MOV R0, #0 = 0xE3A00000, BX LR = 0xE12FFF1E
+                try {
+                    this.emu.mem_write(addr, [0x00, 0x00, 0xA0, 0xE3, 0x1E, 0xFF, 0x2F, 0xE1]);
+                } catch(e) {}
+                return true;  // let execution continue into our stub
+            }
+            // LR not valid — hard stop
             Logger.error('[MEM] FETCH below BASE at 0x' + (addr>>>0).toString(16) +
                 ' — NULL function pointer! PC=0x' + (pc>>>0).toString(16) +
                 ' LR=0x' + (lr>>>0).toString(16) + ' R0=0x' + (r0>>>0).toString(16));
