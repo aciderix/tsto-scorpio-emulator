@@ -961,6 +961,14 @@ class ScorpioEngine {
             }
         }
 
+        // v22: List ALL available Java_ JNI functions from the binary
+        var jniFunctions = this.elf.getJNIFunctions ? this.elf.getJNIFunctions() : [];
+        window._jniFunctions = jniFunctions;
+        Logger.info('Available JNI functions from binary (' + jniFunctions.length + '):');
+        for (var ji = 0; ji < jniFunctions.length; ji++) {
+            Logger.info('  [JNI] ' + jniFunctions[ji].name + ' @ 0x' + jniFunctions[ji].offset.toString(16));
+        }
+
         return true;
     }
 
@@ -992,6 +1000,10 @@ class ScorpioEngine {
     }
 
     runFrame() {
+        // v22: Track GENERIC_RETURN stubs hit during this frame
+        if (!this._frameStubLog) this._frameStubLog = [];
+        var prevStubCalls = new Map(this._genericReturnCalls);
+
         // v22: Ensure rendering state is correct before each frame
         if (this.savedSingletonPtr) {
             var SINGLETON_PTR_ADDR = this.BASE + 0x1A45728;
@@ -1141,6 +1153,37 @@ class ScorpioEngine {
             }
         }
         
+        // v22: Log stubs hit during this frame (first frame only)
+        if (!this._stubsLoggedFirstFrame) {
+            this._stubsLoggedFirstFrame = true;
+            var newStubs = [];
+            var self = this;
+            this._genericReturnCalls.forEach(function(count, lr) {
+                var prev = prevStubCalls.get(lr) || 0;
+                if (count > prev) {
+                    var offset = (lr - self.BASE) >>> 0;
+                    // Try to find what symbol this caller is near
+                    var callerName = '';
+                    if (self.shimHandlers) {
+                        var handler = self.shimHandlers.get(lr);
+                        if (handler) callerName = ' (' + handler.name + ')';
+                    }
+                    newStubs.push({ lr: lr, offset: offset, hits: count - prev, name: callerName });
+                }
+            });
+            if (newStubs.length > 0) {
+                newStubs.sort(function(a,b) { return b.hits - a.hits; });
+                Logger.warn('[v22] GENERIC_RETURN stubs hit during render frame (' + newStubs.length + ' unique):');
+                for (var si = 0; si < Math.min(newStubs.length, 30); si++) {
+                    var s = newStubs[si];
+                    Logger.warn('  LR=0x' + (s.lr>>>0).toString(16) + ' (BIN+0x' + s.offset.toString(16) + ') x' + s.hits + s.name);
+                }
+                window._renderStubs = newStubs;
+            } else {
+                Logger.info('[v22] No GENERIC_RETURN stubs hit during render frame');
+            }
+        }
+
         // v22: Force a visible glClear after ARM rendering
         // The game calls glClearColor but never glClear, so framebuffer is never written.
         // Also inject a test triangle to prove WebGL pipeline works end-to-end.

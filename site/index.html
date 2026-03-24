@@ -716,11 +716,31 @@ window._generateReport = function() {
     lines.push('--- ELF / RELOCATIONS (' + elfInfo.length + ') ---');
     lines.push(summarize(elfInfo, 10));
 
+    // v22: Available JNI functions
+    if (window._jniFunctions && window._jniFunctions.length > 0) {
+        lines.push('--- AVAILABLE JNI FUNCTIONS (' + window._jniFunctions.length + ') ---');
+        for (var i = 0; i < window._jniFunctions.length; i++) {
+            var jf = window._jniFunctions[i];
+            lines.push('  ' + jf.name + ' @ 0x' + jf.offset.toString(16));
+        }
+        lines.push('');
+    }
+
+    // v22: GENERIC_RETURN stubs hit during rendering
+    if (window._renderStubs && window._renderStubs.length > 0) {
+        lines.push('--- RENDER STUBS HIT (' + window._renderStubs.length + ' unresolved calls) ---');
+        for (var i = 0; i < window._renderStubs.length; i++) {
+            var rs = window._renderStubs[i];
+            lines.push('  BIN+0x' + rs.offset.toString(16) + ' x' + rs.hits + rs.name);
+        }
+        lines.push('');
+    }
+
     // Singleton memory dump if available
-    if (eng && eng.emu && eng._singletonAddr) {
+    if (eng && eng.emu && eng.savedSingletonPtr) {
         lines.push('--- SINGLETON MEMORY DUMP ---');
         try {
-            var sa = eng._singletonAddr;
+            var sa = eng.savedSingletonPtr;
             var offsets = [0x0, 0x4, 0x5, 0x8, 0x58, 0x70, 0x1AC, 0xD1B, 0xD1C];
             for (var i = 0; i < offsets.length; i++) {
                 var off = offsets[i];
