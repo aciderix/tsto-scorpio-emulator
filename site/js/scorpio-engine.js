@@ -448,6 +448,15 @@ class ScorpioEngine {
                     var lr = self._readReg(uc.ARM_REG_LR);
                     var count = self._genericReturnCalls.get(lr) || 0;
                     self._genericReturnCalls.set(lr, count + 1);
+                    // v17: Log first 10 generic return calls with context during init
+                    if (count < 3) {
+                        var r0 = self._readReg(uc.ARM_REG_R0);
+                        var r1 = self._readReg(uc.ARM_REG_R1);
+                        var offset = ((lr - self.BASE) >>> 0);
+                        Logger.warn('[STUB] Generic return from LR=0x' + (lr>>>0).toString(16) +
+                            ' (offset 0x' + offset.toString(16) + ') R0=0x' + (r0>>>0).toString(16) +
+                            ' R1=0x' + (r1>>>0).toString(16));
+                    }
                     // v16: Re-write stub in case it was corrupted
                     self._writeGenericReturnStub();
                 }
@@ -806,7 +815,13 @@ class ScorpioEngine {
         }
 
         if (this._genericReturnCalls.size > 0) {
-            Logger.info('Generic return stub called from ' + this._genericReturnCalls.size + ' unique callers');
+            Logger.info('Generic return stub called from ' + this._genericReturnCalls.size + ' unique callers:');
+            var sorted = Array.from(this._genericReturnCalls.entries()).sort(function(a,b){ return b[1]-a[1]; });
+            for (var i = 0; i < Math.min(sorted.length, 20); i++) {
+                var lr = sorted[i][0], count = sorted[i][1];
+                var offset = (lr - this.BASE) >>> 0;
+                Logger.info('  LR=0x' + (lr>>>0).toString(16) + ' (offset 0x' + offset.toString(16) + ') x' + count);
+            }
         }
 
         // Log JNI stats
