@@ -10,16 +10,51 @@
 class GLBridge {
     constructor(canvas) {
         this.canvas = canvas;
-        this.gl = canvas.getContext('webgl', {
+        this.headless = false;
+
+        // v22: Detailed WebGL diagnostic
+        if (!canvas) {
+            console.error('[GL] Canvas is null/undefined!');
+            this.headless = true;
+            this.gl = null;
+            return;
+        }
+        console.log('[GL] Canvas: ' + canvas.width + 'x' + canvas.height + ', id=' + canvas.id + ', tagName=' + canvas.tagName);
+
+        // Try WebGL2 first, then WebGL1
+        this.gl = null;
+        var contextNames = ['webgl2', 'webgl', 'experimental-webgl'];
+        var attrs = {
             alpha: false,
             antialias: false,
             preserveDrawingBuffer: true,
             depth: true,
             stencil: true,
-        }) || canvas.getContext('experimental-webgl');
+            failIfMajorPerformanceCaveat: false,
+            powerPreference: 'default',
+        };
+        for (var i = 0; i < contextNames.length; i++) {
+            try {
+                this.gl = canvas.getContext(contextNames[i], attrs);
+                if (this.gl) {
+                    console.log('[GL] Got context: ' + contextNames[i]);
+                    break;
+                }
+            } catch(e) {
+                console.warn('[GL] getContext(' + contextNames[i] + ') threw: ' + e.message);
+            }
+        }
 
         if (!this.gl) {
-            console.warn('[GL] WebGL not available - running in headless mode');
+            // Last resort: try with no attributes at all
+            try {
+                this.gl = canvas.getContext('webgl');
+            } catch(e) {}
+        }
+
+        if (!this.gl) {
+            console.error('[GL] ALL WebGL context attempts failed! Canvas may be in a restricted context.');
+            console.error('[GL] window.WebGLRenderingContext exists: ' + !!window.WebGLRenderingContext);
             this.headless = true;
             return;
         }
@@ -211,6 +246,34 @@ class GLBridge {
      * Each shim: (emu, [R0, R1, R2, R3]) => return_value
      */
     getShims() {
+        // v22: If headless, return no-op shims that won't crash
+        if (this.headless || !this.gl) {
+            Logger.warn('[GL] Headless mode — returning no-op GL shims');
+            var noop = function() { return 0; };
+            var glNames = [
+                'glEnable','glDisable','glBlendFunc','glCullFace','glFrontFace','glLineWidth',
+                'glViewport','glScissor','glClearColor','glClear','glDepthFunc','glDepthMask',
+                'glDepthRangef','glStencilFunc','glStencilOp','glStencilMask','glColorMask',
+                'glGenTextures','glBindTexture','glTexImage2D','glTexParameteri',
+                'glDeleteTextures','glActiveTexture','glPixelStorei','glCompressedTexImage2D',
+                'glGenerateMipmap','glGenBuffers','glBindBuffer','glBufferData','glBufferSubData',
+                'glDeleteBuffers','glCreateShader','glShaderSource','glCompileShader',
+                'glCreateProgram','glAttachShader','glLinkProgram','glUseProgram',
+                'glGetAttribLocation','glGetUniformLocation','glEnableVertexAttribArray',
+                'glDisableVertexAttribArray','glVertexAttribPointer','glDrawArrays',
+                'glDrawElements','glUniform1i','glUniform1f','glUniform2f','glUniform3f',
+                'glUniform4f','glUniform4fv','glUniformMatrix4fv','glGetShaderiv',
+                'glGetProgramiv','glGetShaderInfoLog','glGetProgramInfoLog','glDeleteShader',
+                'glDeleteProgram','glGetError','glMapBufferOES','glUnmapBufferOES',
+                'glBlendFuncSeparate','glTexSubImage2D',
+            ];
+            var shims = {};
+            for (var i = 0; i < glNames.length; i++) {
+                shims[glNames[i]] = noop;
+            }
+            return shims;
+        }
+
         var gl = this.gl;
         var self = this;
 

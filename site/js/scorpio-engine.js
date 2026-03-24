@@ -79,15 +79,31 @@ class ScorpioEngine {
         this.soBuffer = soBuffer;
         this.elf = new ElfLoader(soBuffer).parse();
 
-        // Initialize WebGL
-        try {
-            this.glBridge = new GLBridge(canvas);
-            if (this.glBridge.headless) {
-                Logger.warn('WebGL not available - running without graphics');
+        // Initialize WebGL — v22: retry with diagnostics
+        this.glBridge = null;
+        var glAttempts = 0;
+        var maxGLAttempts = 3;
+        while (glAttempts < maxGLAttempts) {
+            glAttempts++;
+            try {
+                Logger.info('[GL] WebGL init attempt ' + glAttempts + '/' + maxGLAttempts + '...');
+                Logger.info('[GL] Canvas arg: ' + (canvas ? canvas.tagName + ' ' + canvas.width + 'x' + canvas.height : 'NULL'));
+                this.glBridge = new GLBridge(canvas);
+                if (!this.glBridge.headless) {
+                    Logger.success('[GL] WebGL context acquired on attempt ' + glAttempts);
+                    break;
+                }
+                Logger.warn('[GL] Attempt ' + glAttempts + ' returned headless');
+            } catch(e) {
+                Logger.warn('[GL] Attempt ' + glAttempts + ' threw: ' + e.message);
             }
-        } catch(e) {
-            Logger.warn('WebGL init failed: ' + e.message + ' — continuing without graphics');
-            this.glBridge = { headless: true, callCount: 0, drawCalls: 0, dispatch: function() {}, getShims: function() { return {}; }, getStats: function() { return { calls: 0, draws: 0 }; } };
+            // Brief yield before retry (canvas might need layout time)
+            if (glAttempts < maxGLAttempts) {
+                await new Promise(function(r) { setTimeout(r, 100); });
+            }
+        }
+        if (!this.glBridge || this.glBridge.headless) {
+            Logger.error('[GL] WebGL FAILED after ' + maxGLAttempts + ' attempts — GL calls will be no-ops');
         }
 
         // Initialize JNI
