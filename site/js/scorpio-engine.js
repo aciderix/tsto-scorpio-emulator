@@ -759,13 +759,13 @@ class ScorpioEngine {
         if (singletonPtr && singletonPtr !== 0) {
             // Allocate fake BGCore object (0x200 bytes)
             var bgCoreSize = 0x200;
-            var bgCorePtr = this.shims.malloc(bgCoreSize);
+            var bgCorePtr = AndroidShims.malloc(bgCoreSize);
             // Zero it
             try { this.emu.mem_write(bgCorePtr, new Array(bgCoreSize).fill(0)); } catch(e) {}
 
             // Create vtable: 64 entries of GENERIC_RETURN
             var vtableSize = 64 * 4;
-            var vtablePtr = this.shims.malloc(vtableSize);
+            var vtablePtr = AndroidShims.malloc(vtableSize);
             var vtableData = [];
             for (var vi = 0; vi < 64; vi++) {
                 var addr = this.GENERIC_RETURN;
