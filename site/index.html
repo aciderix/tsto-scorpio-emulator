@@ -5,20 +5,32 @@
 window._capturedLogs = [];
 (function(){
     var origLog = console.log, origWarn = console.warn, origErr = console.error;
+    var lastKey = null, lastEntry = null, repeatCount = 0;
     function ts(){ return new Date().toISOString(); }
+    function capture(level, args){
+        var msg = args.map(String).join(' ');
+        var key = level + '|' + msg;
+        if (key === lastKey && lastEntry) {
+            repeatCount++;
+            lastEntry.msg = msg + '  x' + repeatCount;
+        } else {
+            var entry = {t: ts(), level: level, msg: msg};
+            window._capturedLogs.push(entry);
+            lastKey = key;
+            lastEntry = entry;
+            repeatCount = 1;
+        }
+    }
     console.log = function(){
-        var args = Array.from(arguments);
-        window._capturedLogs.push({t: ts(), level:'LOG', msg: args.map(String).join(' ')});
+        capture('LOG', Array.from(arguments));
         origLog.apply(console, arguments);
     };
     console.warn = function(){
-        var args = Array.from(arguments);
-        window._capturedLogs.push({t: ts(), level:'WARN', msg: args.map(String).join(' ')});
+        capture('WARN', Array.from(arguments));
         origWarn.apply(console, arguments);
     };
     console.error = function(){
-        var args = Array.from(arguments);
-        window._capturedLogs.push({t: ts(), level:'ERR', msg: args.map(String).join(' ')});
+        capture('ERR', Array.from(arguments));
         origErr.apply(console, arguments);
     };
 })();
