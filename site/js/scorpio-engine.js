@@ -67,7 +67,7 @@ class ScorpioEngine {
      * Phase 1: Load the binary and set up emulation
      */
     async load(soBuffer, canvas) {
-        Logger.info('=== Scorpio Engine v15.5: Loading (SharedPrefs + std::string shims + flag fix) ===');
+        Logger.info('=== Scorpio Engine v19: Loading (real render path — flag=0, render-ready=0) ===');
 
         if (typeof uc === 'undefined' || !uc.Unicorn) {
             Logger.error('Unicorn.js not loaded!');
@@ -170,7 +170,7 @@ class ScorpioEngine {
         this._setupHooks();
 
         this.initialized = true;
-        Logger.success('Scorpio Engine v15.5 loaded and ready! (SharedPrefs + std::string + flag fix)');
+        Logger.success('Scorpio Engine v19 loaded and ready! (real render path)');
         Logger.info('  Memory mapped: ' + (this.memMapped/1024/1024).toFixed(1) + ' MB');
         Logger.info('  JNI functions: ' + this.elf.getJNIFunctions().length);
         Logger.info('  GL imports: ' + this.elf.getGLImports().length);
@@ -822,18 +822,17 @@ class ScorpioEngine {
         var SINGLETON_PTR_ADDR = this.BASE + 0x1A45728;
         var singletonPtr = this._readU32FromEmu(SINGLETON_PTR_ADDR);
         if (singletonPtr && singletonPtr !== 0) {
-            // Set render-ready flag
-            this.emu.mem_write(singletonPtr + 0xD1B, [1]);
+            // v19: Correct flag analysis from OGLESRender disassembly:
+            //   flag@0x1A466A8: 0=normal, !=0=SHUTDOWN (confirmed: deletes, mutex_destroy)
+            //   singleton+0xD1B: 0=real render (tail-call 0x12C33C0), !=0=glClear only
+            // So: flag=0, render-ready=0 → REAL rendering path!
+            this.emu.mem_write(singletonPtr + 0xD1B, [0]);  // 0 = real render
             this.savedSingletonPtr = singletonPtr;
-            Logger.success('v13.2: Forced render-ready flag at singleton (0x' + singletonPtr.toString(16) + '+0xD1B) — saved for restoration');
-            
-            // v18: Set engine-running flag to 1 to enable REAL rendering path
-            // Previously forced to 0 which gave only glClear. Now that ScorpioJNI.init
-            // runs before OGLESInit and BGCore is pre-allocated, the engine state is valid
-            // enough for the real render path (flag != 0 → actual draw calls)
+            Logger.success('v19: render-ready=0 at singleton (0x' + singletonPtr.toString(16) + '+0xD1B) — routes to real render function');
+
             var GLOBAL_FLAG_ADDR = this.BASE + 0x1A466A8;
-            this.emu.mem_write(GLOBAL_FLAG_ADDR, [1]);
-            Logger.success('v18: Set engine-running flag at 0x' + GLOBAL_FLAG_ADDR.toString(16) + ' (enables real render path)');
+            this.emu.mem_write(GLOBAL_FLAG_ADDR, [0]);  // 0 = normal (not shutdown)
+            Logger.success('v19: engine-running=0 at 0x' + GLOBAL_FLAG_ADDR.toString(16) + ' (normal mode, not shutdown)');
         } else {
             Logger.warn('v13.2: Singleton pointer is NULL — render-ready flag NOT set');
         }
@@ -889,11 +888,12 @@ class ScorpioEngine {
             if (currentPtr === 0) {
                 // Restore the singleton pointer
                 this._writeU32ToEmu(SINGLETON_PTR_ADDR, this.savedSingletonPtr);
-                // Also ensure render-ready flag is set
-                this.emu.mem_write(this.savedSingletonPtr + 0xD1B, [1]);
+                // Also ensure render-ready flag stays 0 (real render path)
+                this.emu.mem_write(this.savedSingletonPtr + 0xD1B, [0]);
             }
-            // v18: Keep flag=1 for real rendering path (not just glClear)
-            this.emu.mem_write(this.BASE + 0x1A466A8, [1]);
+            // v19: Keep flag=0 (normal mode) and render-ready=0 (real render)
+            this.emu.mem_write(this.BASE + 0x1A466A8, [0]);
+            this.emu.mem_write(this.savedSingletonPtr + 0xD1B, [0]);
         }
         // Start function profiling for first few frames
         if (this._frameProfileCount < this._maxProfileFrames) {
