@@ -743,15 +743,52 @@ class ScorpioEngine {
         results.push(this.callFunction('JNI_OnLoad', this.jni.prepareOnLoad(), true));
 
         // Step 2: BGCore_init
-        Logger.info('Step 2/8: BGCoreJNIBridge.init');
+        Logger.info('Step 2/9: BGCoreJNIBridge.init');
         results.push(this.callFunction('Java_com_bight_android_jni_BGCoreJNIBridge_init', this.jni.prepareBGCoreInit(width, height), true));
 
-        // Step 3: OGLESInit
-        Logger.info('Step 3/8: OGLESInit');
+        // Step 3: ScorpioJNI.init (moved BEFORE OGLESInit — creates Scorpio singleton)
+        Logger.info('Step 3/9: ScorpioJNI.init');
+        results.push(this.callFunction('Java_com_ea_simpsons_ScorpioJNI_init', this.jni.prepareCall('ScorpioJNI_init'), true));
+
+        // === v18: Pre-allocate BGCore object for OGLESInit ===
+        // OGLESInit reads ScorpioSingleton (VA 0x1A45728) → +0x1AC → BGCore object
+        // ScorpioJNI.init just created the singleton, but field +0x1AC (BGCore) is NULL
+        // We allocate a fake BGCore with a vtable pointing to GENERIC_RETURN
+        var SINGLETON_PTR_ADDR = this.BASE + 0x1A45728;
+        var singletonPtr = this._readU32FromEmu(SINGLETON_PTR_ADDR);
+        if (singletonPtr && singletonPtr !== 0) {
+            // Allocate fake BGCore object (0x200 bytes)
+            var bgCoreSize = 0x200;
+            var bgCorePtr = this.shims.malloc(bgCoreSize);
+            // Zero it
+            try { this.emu.mem_write(bgCorePtr, new Array(bgCoreSize).fill(0)); } catch(e) {}
+
+            // Create vtable: 64 entries of GENERIC_RETURN
+            var vtableSize = 64 * 4;
+            var vtablePtr = this.shims.malloc(vtableSize);
+            var vtableData = [];
+            for (var vi = 0; vi < 64; vi++) {
+                var addr = this.GENERIC_RETURN;
+                vtableData.push(addr & 0xFF, (addr >> 8) & 0xFF, (addr >> 16) & 0xFF, (addr >> 24) & 0xFF);
+            }
+            try { this.emu.mem_write(vtablePtr, vtableData); } catch(e) {}
+
+            // Write vtable pointer at BGCore+0
+            this._writeU32ToEmu(bgCorePtr, vtablePtr);
+            // Write BGCore pointer at singleton+0x1AC
+            this._writeU32ToEmu(singletonPtr + 0x1AC, bgCorePtr);
+            Logger.success('v18: Pre-allocated BGCore object at 0x' + bgCorePtr.toString(16) +
+                ' (vtable at 0x' + vtablePtr.toString(16) + ') → singleton+0x1AC');
+        } else {
+            Logger.warn('v18: Scorpio singleton still NULL after ScorpioJNI.init — BGCore NOT pre-allocated');
+        }
+
+        // Step 4: OGLESInit (now has valid BGCore via pre-allocation)
+        Logger.info('Step 4/9: OGLESInit');
         results.push(this.callFunction('Java_com_bight_android_jni_BGCoreJNIBridge_OGLESInit', this.jni.prepareCall('OGLESInit', [width, height]), true));
 
-        // Step 4: OGLESResize
-        Logger.info('Step 4/8: OGLESResize');
+        // Step 5: OGLESResize
+        Logger.info('Step 5/9: OGLESResize');
         results.push(this.callFunction('Java_com_bight_android_jni_BGCoreJNIBridge_OGLESResize', {
             r0: this.jni.JNIENV_BASE,
             r1: this.jni.JOBJECT_BASE,
@@ -759,22 +796,18 @@ class ScorpioEngine {
             r3: height,
         }, true));
 
-        // Step 5: ScorpioJNI.init
-        Logger.info('Step 5/8: ScorpioJNI.init');
-        results.push(this.callFunction('Java_com_ea_simpsons_ScorpioJNI_init', this.jni.prepareCall('ScorpioJNI_init'), true));
-
         // Step 6: Lifecycle.onCreate
-        Logger.info('Step 6/8: Lifecycle.onCreate');
+        Logger.info('Step 6/9: Lifecycle.onCreate');
         results.push(this.callFunction('Java_com_ea_simpsons_ScorpioJNI_LifecycleOnCreate',
             this.jni.prepareCall('LifecycleOnCreate'), true));
 
         // Step 7: Lifecycle.Start
-        Logger.info('Step 7/8: Lifecycle.Start');
+        Logger.info('Step 7/9: Lifecycle.Start');
         results.push(this.callFunction('Java_com_ea_simpsons_ScorpioJNI_LifecycleStart',
             this.jni.prepareCall('LifecycleStart'), true));
 
         // Step 8: Lifecycle.Resume
-        Logger.info('Step 8/8: Lifecycle.Resume');
+        Logger.info('Step 8/9: Lifecycle.Resume');
         results.push(this.callFunction('Java_com_ea_simpsons_ScorpioJNI_LifecycleResume',
             this.jni.prepareCall('LifecycleResume'), true));
         results.push(this.callFunction('Java_com_bight_android_jni_BGCoreJNIBridge_resume', {
