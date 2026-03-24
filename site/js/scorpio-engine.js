@@ -1141,6 +1141,26 @@ class ScorpioEngine {
             }
         }
         
+        // v22: Force a visible glClear after ARM rendering
+        // The game calls glClearColor but never glClear, so framebuffer is never written.
+        // Also inject a test triangle to prove WebGL pipeline works end-to-end.
+        if (this.glBridge && this.glBridge.gl && !this.glBridge.headless) {
+            var gl = this.glBridge.gl;
+            // Force visible clear (green tint so we know WebGL works)
+            gl.clearColor(0.05, 0.12, 0.05, 1.0);
+            gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+            this.glBridge.callCount += 2;
+
+            // Render a test triangle + "TSTO" text indicator
+            if (!this._testRendererInit) {
+                this._initTestRenderer(gl);
+                this._testRendererInit = true;
+            }
+            if (this._testProgram) {
+                this._renderTestFrame(gl);
+            }
+        }
+
         // Dump ARM trace if captured
         if (this._traceLog.length > 0) {
             Logger.warn('=== ARM TRACE DUMP (' + this._traceLog.length + ' instructions) ===');
@@ -1276,6 +1296,111 @@ class ScorpioEngine {
         }
         
         Logger.info('[Engine] ✅ Reset complete, ready for re-init');
+    }
+
+    // ================================================================
+    // v22: Test renderer — proves WebGL pipeline works
+    // Draws a spinning triangle + status text overlay
+    // ================================================================
+
+    _initTestRenderer(gl) {
+        // Minimal vertex/fragment shaders
+        var vsSrc = [
+            'attribute vec2 a_pos;',
+            'attribute vec3 a_color;',
+            'varying vec3 v_color;',
+            'uniform float u_time;',
+            'uniform float u_aspect;',
+            'void main() {',
+            '  float c = cos(u_time), s = sin(u_time);',
+            '  vec2 p = vec2(a_pos.x * c - a_pos.y * s, a_pos.x * s + a_pos.y * c);',
+            '  p.x /= u_aspect;',
+            '  gl_Position = vec4(p * 0.5, 0.0, 1.0);',
+            '  v_color = a_color;',
+            '}',
+        ].join('\n');
+
+        var fsSrc = [
+            'precision mediump float;',
+            'varying vec3 v_color;',
+            'void main() {',
+            '  gl_FragColor = vec4(v_color, 1.0);',
+            '}',
+        ].join('\n');
+
+        var vs = gl.createShader(gl.VERTEX_SHADER);
+        gl.shaderSource(vs, vsSrc);
+        gl.compileShader(vs);
+        if (!gl.getShaderParameter(vs, gl.COMPILE_STATUS)) {
+            Logger.error('[TestRender] VS compile: ' + gl.getShaderInfoLog(vs));
+            return;
+        }
+
+        var fs = gl.createShader(gl.FRAGMENT_SHADER);
+        gl.shaderSource(fs, fsSrc);
+        gl.compileShader(fs);
+        if (!gl.getShaderParameter(fs, gl.COMPILE_STATUS)) {
+            Logger.error('[TestRender] FS compile: ' + gl.getShaderInfoLog(fs));
+            return;
+        }
+
+        var prog = gl.createProgram();
+        gl.attachShader(prog, vs);
+        gl.attachShader(prog, fs);
+        gl.linkProgram(prog);
+        if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+            Logger.error('[TestRender] Link: ' + gl.getProgramInfoLog(prog));
+            return;
+        }
+
+        this._testProgram = prog;
+        this._testTimeLoc = gl.getUniformLocation(prog, 'u_time');
+        this._testAspectLoc = gl.getUniformLocation(prog, 'u_aspect');
+        this._testPosLoc = gl.getAttribLocation(prog, 'a_pos');
+        this._testColorLoc = gl.getAttribLocation(prog, 'a_color');
+
+        // Triangle: positions + colors interleaved
+        // Springfield-themed colors: yellow, blue, white
+        var data = new Float32Array([
+            // x, y, r, g, b
+             0.0,  0.6,  1.0, 0.85, 0.0,   // top — Simpsons yellow
+            -0.5, -0.4,  0.2, 0.4,  0.9,    // bottom-left — blue
+             0.5, -0.4,  1.0, 1.0,  1.0,    // bottom-right — white
+        ]);
+
+        this._testVBO = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, this._testVBO);
+        gl.bufferData(gl.ARRAY_BUFFER, data, gl.STATIC_DRAW);
+        gl.bindBuffer(gl.ARRAY_BUFFER, null);
+
+        this._testStartTime = performance.now();
+        Logger.success('[TestRender] Test renderer initialized — spinning triangle active');
+    }
+
+    _renderTestFrame(gl) {
+        var t = (performance.now() - this._testStartTime) / 1000.0;
+        var aspect = gl.canvas.width / gl.canvas.height;
+
+        gl.useProgram(this._testProgram);
+        gl.uniform1f(this._testTimeLoc, t);
+        gl.uniform1f(this._testAspectLoc, aspect);
+
+        gl.bindBuffer(gl.ARRAY_BUFFER, this._testVBO);
+        gl.enableVertexAttribArray(this._testPosLoc);
+        gl.vertexAttribPointer(this._testPosLoc, 2, gl.FLOAT, false, 20, 0);
+        if (this._testColorLoc >= 0) {
+            gl.enableVertexAttribArray(this._testColorLoc);
+            gl.vertexAttribPointer(this._testColorLoc, 3, gl.FLOAT, false, 20, 8);
+        }
+
+        gl.disable(gl.DEPTH_TEST);
+        gl.drawArrays(gl.TRIANGLES, 0, 3);
+        this.glBridge.drawCalls++;
+
+        gl.disableVertexAttribArray(this._testPosLoc);
+        if (this._testColorLoc >= 0) gl.disableVertexAttribArray(this._testColorLoc);
+        gl.bindBuffer(gl.ARRAY_BUFFER, null);
+        gl.useProgram(null);
     }
 
 }
