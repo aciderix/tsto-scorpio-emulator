@@ -1102,6 +1102,40 @@ const AndroidShims = {
             'sched_yield':           function(emu, args) { return 0; },
             'sched_get_priority_min':function(emu, args) { return 0; },
 
+            // rwlock (read-write lock) stubs
+            'pthread_rwlock_init':    function(emu, args) { return 0; },
+            'pthread_rwlock_destroy': function(emu, args) { return 0; },
+            'pthread_rwlock_rdlock':  function(emu, args) { return 0; },
+            'pthread_rwlock_wrlock':  function(emu, args) { return 0; },
+            'pthread_rwlock_unlock':  function(emu, args) { return 0; },
+            'pthread_rwlock_tryrdlock': function(emu, args) { return 0; },
+            'pthread_rwlock_trywrlock': function(emu, args) { return 0; },
+            'pthread_rwlockattr_init':    function(emu, args) { return 0; },
+            'pthread_rwlockattr_destroy': function(emu, args) { return 0; },
+
+            // TLS (thread-local storage) stubs
+            'pthread_key_create':    function(emu, args) {
+                // args[0] = key ptr, args[1] = destructor
+                // Write a fake key value
+                if (args[0]) {
+                    if (!self._nextTlsKey) self._nextTlsKey = 1;
+                    try { engine.emu.mem_write(args[0], [self._nextTlsKey & 0xFF, 0, 0, 0]); } catch(e) {}
+                    self._nextTlsKey++;
+                }
+                return 0;
+            },
+            'pthread_key_delete':    function(emu, args) { return 0; },
+            'pthread_setspecific':   function(emu, args) {
+                // args[0] = key, args[1] = value
+                if (!self._tlsStore) self._tlsStore = {};
+                self._tlsStore[args[0]] = args[1];
+                return 0;
+            },
+            'pthread_getspecific':   function(emu, args) {
+                if (!self._tlsStore) self._tlsStore = {};
+                return self._tlsStore[args[0]] || 0;
+            },
+
             // ============================================
             // System
             // ============================================
@@ -1184,6 +1218,38 @@ const AndroidShims = {
             '_ZdlPv':  function(emu, args) { self.free(args[0]); return 0; },
             '_ZdaPv':  function(emu, args) { self.free(args[0]); return 0; },
 
+            // C++ RTTI dynamic_cast — returns dest_ptr or NULL
+            '__dynamic_cast': function(emu, args) {
+                // args: [src_ptr, src_type, dst_type, offset]
+                // In a single-threaded emulator, just return the source pointer
+                // (acts like static_cast — good enough for most game code)
+                return args[0];
+            },
+
+            // C++ exception handling
+            '_ZSt9terminatev': function(emu, args) {
+                Logger.error('[C++] std::terminate() called!');
+                return 0;
+            },
+            '__cxa_pure_virtual': function(emu, args) {
+                Logger.error('[C++] Pure virtual call!');
+                return 0;
+            },
+            '__cxa_atexit': function(emu, args) { return 0; },
+            '__cxa_guard_acquire': function(emu, args) {
+                // Static local variable guard — check if already initialized
+                if (args[0]) {
+                    try {
+                        var guardBuf = engine.emu.mem_read(args[0], 1);
+                        if (guardBuf[0] !== 0) return 0; // already initialized
+                        engine.emu.mem_write(args[0], [1]); // mark as initializing
+                    } catch(e) {}
+                }
+                return 1; // needs initialization
+            },
+            '__cxa_guard_release': function(emu, args) { return 0; },
+            '__cxa_guard_abort':   function(emu, args) { return 0; },
+
             // ============================================
             // Compression (zlib stubs)
             // ============================================
@@ -1193,9 +1259,14 @@ const AndroidShims = {
             'inflateReset':  function(emu, args) { return 0; },
             'inflateInit_':  function(emu, args) { return 0; },
             'deflate':       function(emu, args) { return 0; },
+            'deflateInit_':  function(emu, args) { return 0; },
             'deflateInit2_': function(emu, args) { return 0; },
             'deflateEnd':    function(emu, args) { return 0; },
             'deflateReset':  function(emu, args) { return 0; },
+            'compressBound': function(emu, args) { return (args[0] || 0) + 128; },
+            'compress':      function(emu, args) { return 0; },
+            'compress2':     function(emu, args) { return 0; },
+            'uncompress':    function(emu, args) { return 0; },
             'crc32':         function(emu, args) { return 0; },
 
             // ============================================

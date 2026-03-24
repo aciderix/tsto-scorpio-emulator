@@ -143,6 +143,14 @@ class ScorpioEngine {
             if (seg.memsz > seg.filesz) { /* zero-init by mem_map */ }
         }
 
+        // v21: NOP render gate checks (safety net while engine state is uncertain)
+        // At 0x12C36B4: BEQ that skips rendering when singleton[4]==0
+        // At 0x12C36C0: BNE that skips rendering when singleton[5]!=0
+        var NOP = [0x00, 0x00, 0xA0, 0xE1]; // MOV R0, R0
+        this.emu.mem_write(this.BASE + 0x12C36B4, NOP);
+        this.emu.mem_write(this.BASE + 0x12C36C0, NOP);
+        Logger.success('v21: NOP\'d render gate checks at +0x12C36B4/+0x12C36C0');
+
         // Map stack
         this.emu.mem_map(this.STACK, this.STACK_SIZE, uc.PROT_ALL);
         this.memMapped += this.STACK_SIZE;
@@ -221,29 +229,33 @@ class ScorpioEngine {
         Logger.success('R_ARM_RELATIVE: ' + relativeApplied + ' applied (' + (performance.now() - t0).toFixed(0) + 'ms)');
 
         var t1 = performance.now();
-        var absRebased = 0;
+        var absSkippedNull = 0;
         for (var rel of this.elf.absRelocations) {
             var fileOff = this.elf.vaToFileOffset(rel.offset);
             if (fileOff !== null && fileOff >= 0 && fileOff + 4 <= bufLen) {
                 var addend = dv.getUint32(fileOff, true);
                 if (rel.symValue !== undefined && rel.symValue > 0) {
+                    // Symbol has a value: result = BASE + symValue + addend
                     dv.setUint32(fileOff, ((this.BASE + rel.symValue) + addend) >>> 0, true);
                     absApplied++;
                 } else if (rel.symShndx && rel.symShndx !== 0) {
+                    // Symbol defined in a section (value=0): result = BASE + addend
                     dv.setUint32(fileOff, (this.BASE + addend) >>> 0, true);
                     absApplied++;
-                } else if (addend > 0 && addend < this.elf.mapSize) {
-                    // v17: Null symbol or undefined — addend is a VA in the binary, rebase it
-                    // Same logic as R_ARM_RELATIVE: result = BASE + addend
-                    dv.setUint32(fileOff, (this.BASE + addend) >>> 0, true);
-                    absApplied++;
-                    absRebased++;
+                } else {
+                    // v21 FIX: NULL/undefined symbol (sym_idx=0).
+                    // Per ARM ELF spec: R_ARM_ABS32 result = S + A = 0 + A = A (unchanged)
+                    // Do NOT add BASE — that was corrupting 3202 vtable entries,
+                    // data pointers, and turning constants like 0x4000 or ASCII "nik"
+                    // (0x6e696b) into bogus addresses.
+                    // If the linker wanted BASE added, it would use R_ARM_RELATIVE.
+                    absSkippedNull++;
                 }
             } else {
                 errors++;
             }
         }
-        Logger.success('R_ARM_ABS32: ' + absApplied + ' applied (' + absRebased + ' rebased from null sym) (' + (performance.now() - t1).toFixed(0) + 'ms)');
+        Logger.success('R_ARM_ABS32: ' + absApplied + ' applied, ' + absSkippedNull + ' null-sym left as-is (' + (performance.now() - t1).toFixed(0) + 'ms)');
 
         if (errors > 0) {
             Logger.warn('Data relocations: ' + errors + ' entries skipped');
@@ -880,29 +892,11 @@ class ScorpioEngine {
             this.emu.mem_write(singletonPtr + 0xD1C, [0]); // ensure deeper path
             Logger.success('v20: engine-init flag=1 at singleton+4, D1C=0 (deep render path)');
 
-            // v20.3: Read the engine state flag AFTER init — don't blindly overwrite!
-            // OGLESRender checks byte[0] at 0x1A466A8:
-            //   0 → glClear only (idle)
-            //   1 → shutdown path (deletes, mutexes)
-            //   Need to find what value LifecycleStart set it to
+            // v21: engine flag=0, D1B=0 routes through OGLESRender to real render fn
+            // Gate checks at 0x12C36B4/0x12C36C0 are NOP'd as safety net
             var GLOBAL_FLAG_ADDR = this.BASE + 0x1A466A8;
-            var flagBuf = this.emu.mem_read(GLOBAL_FLAG_ADDR, 32);
-            var currentFlag = flagBuf[0];
-            Logger.info('v20.3: engine-state struct at 0x' + GLOBAL_FLAG_ADDR.toString(16) + ':');
-            Logger.info('  byte[0] (render flag) = ' + currentFlag);
-            Logger.info('  bytes[0..7] = ' + Array.from(flagBuf.slice(0, 8)).map(function(b){return '0x'+b.toString(16)}).join(' '));
-            Logger.info('  bytes[8..15] = ' + Array.from(flagBuf.slice(8, 16)).map(function(b){return '0x'+b.toString(16)}).join(' '));
-            Logger.info('  words[0x14..0x20] = ' + [0x14,0x18,0x1C,0x20].map(function(off){
-                return '0x' + ((flagBuf[off]|(flagBuf[off+1]<<8)|(flagBuf[off+2]<<16)|(flagBuf[off+3]<<24))>>>0).toString(16);
-            }).join(' '));
-            // Don't overwrite — let the engine manage this flag
-            if (currentFlag === 0) {
-                Logger.warn('v20.3: engine flag is 0 after init — render will be glClear only');
-                Logger.warn('  Will try flag=2 (speculative: maybe 2=active rendering)');
-                this.emu.mem_write(GLOBAL_FLAG_ADDR, [2]);
-            } else {
-                Logger.info('v20.3: engine flag=' + currentFlag + ' — leaving as-is');
-            }
+            this.emu.mem_write(GLOBAL_FLAG_ADDR, [0]);
+            Logger.success('v21: engine-flag=0, D1B=0, gate NOPs → full render path');
         } else {
             Logger.warn('v13.2: Singleton pointer is NULL — render-ready flag NOT set');
         }
@@ -951,25 +945,19 @@ class ScorpioEngine {
     }
 
     runFrame() {
-        // v13.2: Restore singleton pointer if it was zeroed by chaotic init execution
+        // v21: Ensure rendering state is correct before each frame
         if (this.savedSingletonPtr) {
             var SINGLETON_PTR_ADDR = this.BASE + 0x1A45728;
             var currentPtr = this._readU32FromEmu(SINGLETON_PTR_ADDR);
             if (currentPtr === 0) {
-                // Restore the singleton pointer
                 this._writeU32ToEmu(SINGLETON_PTR_ADDR, this.savedSingletonPtr);
-                // Also ensure render-ready flag stays 0 (real render path)
-                this.emu.mem_write(this.savedSingletonPtr + 0xD1B, [0]);
             }
-            // v20.3: Don't overwrite engine flag — only ensure it's not 0
-            var eflag = this.emu.mem_read(this.BASE + 0x1A466A8, 1)[0];
-            if (eflag === 0) {
-                this.emu.mem_write(this.BASE + 0x1A466A8, [2]);
-            }
-            this.emu.mem_write(this.savedSingletonPtr + 0xD1B, [0]);
-            // v20: Keep engine-init flag and deep render path
-            this.emu.mem_write(this.savedSingletonPtr + 4, [1]);
-            this.emu.mem_write(this.savedSingletonPtr + 0xD1C, [0]);
+            // OGLESRender routing: flag==0 → D1B==0 → tail-call 0x12C33C0 (render fn)
+            this.emu.mem_write(this.BASE + 0x1A466A8, [0]);     // engine flag = 0
+            this.emu.mem_write(this.savedSingletonPtr + 0xD1B, [0]); // D1B = 0 → render path
+            this.emu.mem_write(this.savedSingletonPtr + 0xD1C, [0]); // D1C = 0 → deeper path
+            this.emu.mem_write(this.savedSingletonPtr + 4, [1]);     // engine init = 1
+            this.emu.mem_write(this.savedSingletonPtr + 5, [0]);     // no error
         }
         // Start function profiling for first few frames
         if (this._frameProfileCount < this._maxProfileFrames) {
