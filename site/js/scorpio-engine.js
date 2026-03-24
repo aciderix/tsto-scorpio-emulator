@@ -211,6 +211,7 @@ class ScorpioEngine {
         Logger.success('R_ARM_RELATIVE: ' + relativeApplied + ' applied (' + (performance.now() - t0).toFixed(0) + 'ms)');
 
         var t1 = performance.now();
+        var absRebased = 0;
         for (var rel of this.elf.absRelocations) {
             var fileOff = this.elf.vaToFileOffset(rel.offset);
             if (fileOff !== null && fileOff >= 0 && fileOff + 4 <= bufLen) {
@@ -221,12 +222,18 @@ class ScorpioEngine {
                 } else if (rel.symShndx && rel.symShndx !== 0) {
                     dv.setUint32(fileOff, (this.BASE + addend) >>> 0, true);
                     absApplied++;
+                } else if (addend > 0 && addend < this.elf.mapSize) {
+                    // v17: Null symbol or undefined — addend is a VA in the binary, rebase it
+                    // Same logic as R_ARM_RELATIVE: result = BASE + addend
+                    dv.setUint32(fileOff, (this.BASE + addend) >>> 0, true);
+                    absApplied++;
+                    absRebased++;
                 }
             } else {
                 errors++;
             }
         }
-        Logger.success('R_ARM_ABS32: ' + absApplied + ' applied (' + (performance.now() - t1).toFixed(0) + 'ms)');
+        Logger.success('R_ARM_ABS32: ' + absApplied + ' applied (' + absRebased + ' rebased from null sym) (' + (performance.now() - t1).toFixed(0) + 'ms)');
 
         if (errors > 0) {
             Logger.warn('Data relocations: ' + errors + ' entries skipped');
