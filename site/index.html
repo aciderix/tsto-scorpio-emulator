@@ -680,6 +680,12 @@ window._generateReport = function() {
         }
         lines.push('  Loading screen frames: ' + (eng._loadingScreenFrameCount || 0));
         lines.push('  Loading screen done: ' + !!eng._loadingScreenDone);
+        // v24: Heap and thread stats
+        var s = eng.getStats ? eng.getStats() : {};
+        lines.push('  Heap: ' + (s.heapUsed || '?') + 'MB used, ' + (s.heapAllocs || 0) + ' allocs, ' +
+                    (s.heapFrees || 0) + ' frees, ' + (s.heapRecycled || 0) + ' recycled');
+        lines.push('  Threads: ' + (s.threadsCreated || 0) + ' created, ' + (s.threadsExecuted || 0) + ' executed');
+        lines.push('  DLsym stubs: ' + (s.dlsymStubs || 0));
     } else {
         lines.push('  Engine not initialized');
     }

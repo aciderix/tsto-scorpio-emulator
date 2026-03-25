@@ -479,6 +479,23 @@ class ScorpioEngine {
                         var n = handler.name;
                         self._frameCallProfile.set(n, (self._frameCallProfile.get(n) || 0) + 1);
                     }
+                    // v24: Log shim calls in trace mode for debugging render path
+                    if (self._traceEnabled && self._traceInsnsCount < self._traceMaxInsns) {
+                        var lr = self._readReg(uc.ARM_REG_LR);
+                        self._traceLog.push({
+                            n: self._traceInsnsCount + 1,
+                            pc: '0x' + (addr>>>0).toString(16),
+                            off: 'SHIM:' + handler.name,
+                            bytes: '-- shim --',
+                            r0: '0x' + (r0>>>0).toString(16),
+                            r1: '0x' + (r1>>>0).toString(16),
+                            r2: '0x' + (r2>>>0).toString(16),
+                            r3: '0x' + (r3>>>0).toString(16),
+                            sp: '0x' + (self._readReg(uc.ARM_REG_SP)>>>0).toString(16),
+                            lr: '0x' + (lr>>>0).toString(16),
+                            mem: ''
+                        });
+                    }
                     var result = handler.handler(self.emu, [r0, r1, r2, r3]);
                     if (result !== undefined && result !== null) {
                         self._writeReg(uc.ARM_REG_R0, result >>> 0);
@@ -1218,18 +1235,18 @@ class ScorpioEngine {
             // Log direct call trace
             if (this._traceLog.length > 0) {
                 Logger.info('[v23] === LOADING RENDERER 0x12C2F34 TRACE (' + this._traceLog.length + ' instructions) ===');
-                // Log first 20 instructions
-                for (var m = 0; m < Math.min(20, this._traceLog.length); m++) {
+                // Log first 40 instructions (include shim names)
+                for (var m = 0; m < Math.min(40, this._traceLog.length); m++) {
                     var t = this._traceLog[m];
                     Logger.info('  #' + t.n + ' ' + t.off + ' [' + t.bytes + '] R0=' + t.r0 + ' R1=' + t.r1 + ' LR=' + t.lr + (t.mem ? ' ' + t.mem : ''));
                 }
-                if (this._traceLog.length > 20) {
-                    Logger.info('  ... (' + (this._traceLog.length - 20) + ' more)');
+                if (this._traceLog.length > 40) {
+                    Logger.info('  ... (' + (this._traceLog.length - 40) + ' more)');
                 }
-                // Log last 10 if different
-                if (this._traceLog.length > 30) {
-                    Logger.info('[v23] Last 10 instructions of loading renderer:');
-                    var dstart = this._traceLog.length - 10;
+                // Log last 15 if different
+                if (this._traceLog.length > 55) {
+                    Logger.info('[v23] Last 15 instructions of loading renderer:');
+                    var dstart = this._traceLog.length - 15;
                     for (var dm = dstart; dm < this._traceLog.length; dm++) {
                         var dt = this._traceLog[dm];
                         Logger.info('  #' + dt.n + ' ' + dt.off + ' [' + dt.bytes + '] R0=' + dt.r0 + ' R1=' + dt.r1 + ' LR=' + dt.lr + (dt.mem ? ' ' + dt.mem : ''));
@@ -1409,6 +1426,13 @@ class ScorpioEngine {
             glDraws: glStats.draws || 0,
             autoMapped: this._autoMapped.size,
             unmappedAccesses: this._unmappedAccessLog.length,
+            heapUsed: Math.round((AndroidShims._heapPtr - AndroidShims._heapBase) / 1048576),
+            heapAllocs: AndroidShims._allocCount,
+            heapFrees: AndroidShims._freeCount,
+            heapRecycled: AndroidShims._recycledCount,
+            threadsCreated: AndroidShims._nextThreadId - 100,
+            threadsExecuted: AndroidShims._threadExecCount,
+            dlsymStubs: AndroidShims._dlsymStubs ? AndroidShims._dlsymStubs.size : 0,
         };
     }
 
