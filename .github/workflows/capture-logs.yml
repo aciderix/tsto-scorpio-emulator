@@ -8,6 +8,9 @@ on:
       - 'logs/**'            # Ignore les commits de logs (évite boucle infinie)
   workflow_dispatch:          # Trigger manuel depuis GitHub UI
 
+permissions:
+  contents: write
+
 jobs:
   deploy-and-capture:
     runs-on: ubuntu-latest
