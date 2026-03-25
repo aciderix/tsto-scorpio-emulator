@@ -928,6 +928,35 @@ class ScorpioEngine {
             var GLOBAL_FLAG_ADDR = this.BASE + 0x1A466A8;
             this.emu.mem_write(GLOBAL_FLAG_ADDR, [1]);
             Logger.success('v22: engine-flag=1 (loading mode), D1B=0, D1C=1 → loading screen render path');
+
+            // === v23: PATCH ARM BINARY to hardcode singleton in dispatch ===
+            // The dispatch at 0x12C30C4 reads a global pointer from VA 0x1A45728:
+            //   LDR R0, [PC, #4]     ; load literal offset from 0x12C30D0
+            //   LDR R0, [PC, R0]     ; indirect read from global at 0x1A45728
+            //   BX LR
+            // Writing to 0x1A45728 from JS gets cleared before OGLESRender reads it.
+            // FIX: Replace the dispatch to return singleton directly from literal pool.
+            //   LDR R0, [PC, #4]     ; load singleton from literal at 0x12C30D0 (SAME instruction)
+            //   BX LR                ; return immediately (skip indirect load)
+            //   <nop>                ; was BX LR, now dead
+            //   <singleton ptr>      ; was 0x00782658 offset, now singleton ptr value
+            this.emu.mem_write(this.BASE + 0x12C30C8, [
+                0x1E, 0xFF, 0x2F, 0xE1  // BX LR (was: LDR R0, [PC, R0])
+            ]);
+            this._writeU32ToEmu(this.BASE + 0x12C30D0, singletonPtr); // literal = singleton ptr
+            Logger.success('v23: Patched dispatch@0x12C30C4 → returns singleton 0x' + singletonPtr.toString(16) + ' directly');
+
+            // Also patch the loading renderer wrapper at 0x12C2EF8:
+            //   PUSH; MOV R11,SP; LDR R0,[PC,#0x24]; LDR R0,[PC,R0]; CMP; POPEQ
+            // The second LDR reads from 0x1A45728 (same global). Patch:
+            //   Replace LDR R0,[PC,R0] at 0x12C2F04 with NOP
+            //   Replace literal at 0x12C2F2C with singleton ptr value
+            // Then: LDR R0,[PC,#0x24] loads singleton directly, CMP!=0, continues to renderer
+            this.emu.mem_write(this.BASE + 0x12C2F04, [
+                0x00, 0x00, 0xA0, 0xE1  // NOP (MOV R0,R0) — skip indirect global read
+            ]);
+            this._writeU32ToEmu(this.BASE + 0x12C2F2C, singletonPtr); // literal = singleton ptr
+            Logger.success('v23: Patched renderer@0x12C2EF8 → loads singleton 0x' + singletonPtr.toString(16) + ' from literal pool');
         } else {
             Logger.warn('v13.2: Singleton pointer is NULL — render-ready flag NOT set');
         }
