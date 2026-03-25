@@ -944,7 +944,10 @@ class ScorpioEngine {
                 0x1E, 0xFF, 0x2F, 0xE1  // BX LR (was: LDR R0, [PC, R0])
             ]);
             this._writeU32ToEmu(this.BASE + 0x12C30D0, singletonPtr); // literal = singleton ptr
-            Logger.success('v23: Patched dispatch@0x12C30C4 → returns singleton 0x' + singletonPtr.toString(16) + ' directly');
+            // Verify patch
+            var patchVerify1 = this.emu.mem_read(this.BASE + 0x12C30C4, 16);
+            Logger.success('v23: Patched dispatch@0x12C30C4 bytes: ' +
+                Array.from(patchVerify1).map(function(b){return ('0'+b.toString(16)).slice(-2)}).join(' '));
 
             // Also patch the loading renderer wrapper at 0x12C2EF8:
             //   PUSH; MOV R11,SP; LDR R0,[PC,#0x24]; LDR R0,[PC,R0]; CMP; POPEQ
@@ -956,7 +959,14 @@ class ScorpioEngine {
                 0x00, 0x00, 0xA0, 0xE1  // NOP (MOV R0,R0) — skip indirect global read
             ]);
             this._writeU32ToEmu(this.BASE + 0x12C2F2C, singletonPtr); // literal = singleton ptr
-            Logger.success('v23: Patched renderer@0x12C2EF8 → loads singleton 0x' + singletonPtr.toString(16) + ' from literal pool');
+            var patchVerify2 = this.emu.mem_read(this.BASE + 0x12C2EF8, 56);
+            Logger.success('v23: Patched renderer@0x12C2EF8 bytes(+0..+8): ' +
+                Array.from(patchVerify2.slice(0, 16)).map(function(b){return ('0'+b.toString(16)).slice(-2)}).join(' '));
+            Logger.success('v23: Patched renderer literal@0x12C2F2C: ' +
+                Array.from(patchVerify2.slice(0x2C - 0x00 + 0, 0x2C - 0x00 + 4)).map(function(b){return ('0'+b.toString(16)).slice(-2)}).join(' '));
+            // Also verify the global at 0x1A45728
+            var globalVal = this._readU32FromEmu(this.BASE + 0x1A45728);
+            Logger.success('v23: Global@0x1A45728 = 0x' + globalVal.toString(16) + ' (singleton=0x' + singletonPtr.toString(16) + ')');
         } else {
             Logger.warn('v13.2: Singleton pointer is NULL — render-ready flag NOT set');
         }
@@ -1093,6 +1103,12 @@ class ScorpioEngine {
             if (this._loadingScreenFrameCount <= 5) {
                 Logger.info('[v22] OGLESRenderGLLoadingScreen: ' + loadInsns + ' insns, R0=0x' +
                     ((loadingResult && loadingResult.r0 || 0) >>> 0).toString(16));
+                // v23: Verify dispatch patch is still intact before OGLESRender
+                var dispBytes = this.emu.mem_read(this.BASE + 0x12C30C4, 16);
+                Logger.info('[v23] dispatch@0x12C30C4 pre-OGLESRender: ' +
+                    Array.from(dispBytes).map(function(b){return ('0'+b.toString(16)).slice(-2)}).join(' '));
+                var globalNow = this._readU32FromEmu(this.BASE + 0x1A45728);
+                Logger.info('[v23] global@0x1A45728 = 0x' + globalNow.toString(16));
             }
 
             // Check if scene graph became populated (singleton+0x58 != 0)
