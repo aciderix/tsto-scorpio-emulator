@@ -1,37 +1,49 @@
-name: Capture TSTO Logs via BrowserBase
+name: Deploy & Capture TSTO Logs
 
 on:
-  repository_dispatch:
-    types: [netlify-deploy]
-  workflow_dispatch:
+  push:
+    branches:
+      - 'claude/**'          # Toute branche claude/*
+    paths-ignore:
+      - 'logs/**'            # Ignore les commits de logs (évite boucle infinie)
+  workflow_dispatch:          # Trigger manuel depuis GitHub UI
 
 jobs:
-  capture-logs:
+  deploy-and-capture:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
-    
+    timeout-minutes: 8
+
     steps:
+      # ── Checkout ──
       - uses: actions/checkout@v4
         with:
-          ref: claude/setup-tsto-emulator-BQgHo
           token: ${{ secrets.GITHUB_TOKEN }}
-      
+
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      
+
       - name: Install dependencies
         run: pip install websocket-client
-      
-      - name: Wait for Netlify to finish deploying
-        run: sleep 30
-      
-      - name: Run BrowserBase log capture
+
+      # ── Step 1: Deploy sur Netlify ──
+      - name: Deploy to Netlify via deploy.py
+        env:
+          NETLIFY_TOKEN: ${{ secrets.NETLIFY_TOKEN }}
+        run: |
+          echo "🚀 Deploying to Netlify..."
+          python scripts/deploy.py
+          echo "⏳ Waiting 10s for CDN propagation..."
+          sleep 10
+
+      # ── Step 2: BrowserBase capture ──
+      - name: Capture logs via BrowserBase
         env:
           BROWSERBASE_API_KEY: ${{ secrets.BROWSERBASE_API_KEY }}
           BROWSERBASE_PROJECT_ID: ${{ secrets.BROWSERBASE_PROJECT_ID }}
         run: python scripts/capture-logs.py
-      
+
+      # ── Step 3: Commit & Push logs ──
       - name: Commit and push logs
         run: |
           git config user.name "github-actions[bot]"
