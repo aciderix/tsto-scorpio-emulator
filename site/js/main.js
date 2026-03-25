@@ -249,6 +249,13 @@
 
             frameCount++;
 
+            // v23: Draw JS loading screen on top of native GL output
+            // Native renderer only produces glClear (black) because its rendering
+            // sub-objects are not initialized. This gives visual feedback.
+            if (engine && engine.glBridge && engine.glBridge.drawLoadingScreen) {
+                engine.glBridge.drawLoadingScreen(frameCount);
+            }
+
             // FPS counter
             const now = performance.now();
             if (now - lastFpsTime > 1000) {

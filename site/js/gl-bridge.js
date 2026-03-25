@@ -1072,6 +1072,126 @@ class GLBridge {
     }
 
     // ================================================================
+    // LOADING SCREEN (JS-side rendering while native engine initializes)
+    // ================================================================
+
+    drawLoadingScreen(frameNum) {
+        var gl = this.gl;
+        if (!gl) return;
+
+        // Only create shader program once
+        if (!this._loadingProg) {
+            var vs = gl.createShader(gl.VERTEX_SHADER);
+            gl.shaderSource(vs, 'attribute vec2 aPos; attribute vec2 aUV; varying vec2 vUV; void main() { gl_Position = vec4(aPos, 0.0, 1.0); vUV = aUV; }');
+            gl.compileShader(vs);
+
+            var fs = gl.createShader(gl.FRAGMENT_SHADER);
+            gl.shaderSource(fs, [
+                'precision mediump float;',
+                'varying vec2 vUV;',
+                'uniform float uTime;',
+                'uniform float uProgress;',
+                'void main() {',
+                '  // TSTO sky blue gradient background',
+                '  vec3 skyTop = vec3(0.30, 0.65, 0.95);',
+                '  vec3 skyBot = vec3(0.55, 0.82, 0.98);',
+                '  vec3 bg = mix(skyBot, skyTop, vUV.y);',
+                '  // Green ground at bottom',
+                '  if (vUV.y < 0.25) {',
+                '    float t = vUV.y / 0.25;',
+                '    vec3 grass = vec3(0.30, 0.65, 0.15);',
+                '    bg = mix(grass, bg, t);',
+                '  }',
+                '  // Progress bar',
+                '  vec2 barCenter = vec2(0.5, 0.15);',
+                '  vec2 barSize = vec2(0.35, 0.02);',
+                '  vec2 d = abs(vUV - barCenter);',
+                '  if (d.x < barSize.x && d.y < barSize.y) {',
+                '    // Bar outline',
+                '    vec3 barBg = vec3(0.2, 0.2, 0.3);',
+                '    float fillX = (vUV.x - (barCenter.x - barSize.x)) / (2.0 * barSize.x);',
+                '    if (fillX < uProgress) {',
+                '      // Filled portion - animated yellow',
+                '      float pulse = 0.85 + 0.15 * sin(uTime * 3.0 + fillX * 10.0);',
+                '      bg = vec3(1.0, 0.82, 0.0) * pulse;',
+                '    } else {',
+                '      bg = barBg;',
+                '    }',
+                '  }',
+                '  // Donut shimmer animation at top',
+                '  float cx = 0.5 + 0.03 * sin(uTime * 1.5);',
+                '  float cy = 0.72;',
+                '  float dist = length(vUV - vec2(cx, cy));',
+                '  if (dist < 0.08 && dist > 0.04) {',
+                '    float ring = smoothstep(0.04, 0.05, dist) * smoothstep(0.08, 0.07, dist);',
+                '    vec3 donut = vec3(0.95, 0.55, 0.70) * (0.8 + 0.2 * sin(uTime * 4.0));',
+                '    bg = mix(bg, donut, ring * 0.9);',
+                '  }',
+                '  // Pink frosting on top half of donut',
+                '  if (dist < 0.065 && dist > 0.04 && vUV.y > cy) {',
+                '    bg = mix(bg, vec3(1.0, 0.4, 0.7), 0.7);',
+                '  }',
+                '  gl_FragColor = vec4(bg, 1.0);',
+                '}'
+            ].join('\n'));
+            gl.compileShader(fs);
+
+            if (!gl.getShaderParameter(fs, gl.COMPILE_STATUS)) {
+                console.error('[GL] Loading screen FS error:', gl.getShaderInfoLog(fs));
+            }
+
+            var prog = gl.createProgram();
+            gl.attachShader(prog, vs);
+            gl.attachShader(prog, fs);
+            gl.linkProgram(prog);
+
+            // Fullscreen quad: pos(x,y) + uv(u,v)
+            var verts = new Float32Array([
+                -1, -1, 0, 0,
+                 1, -1, 1, 0,
+                 1,  1, 1, 1,
+                -1,  1, 0, 1,
+            ]);
+            var buf = gl.createBuffer();
+            gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+            gl.bufferData(gl.ARRAY_BUFFER, verts, gl.STATIC_DRAW);
+
+            this._loadingProg = prog;
+            this._loadingBuf = buf;
+            this._loadingVS = vs;
+            this._loadingFS = fs;
+            this._loadingTimeLoc = gl.getUniformLocation(prog, 'uTime');
+            this._loadingProgressLoc = gl.getUniformLocation(prog, 'uProgress');
+            this._loadingPosLoc = gl.getAttribLocation(prog, 'aPos');
+            this._loadingUVLoc = gl.getAttribLocation(prog, 'aUV');
+            this._loadingStartTime = performance.now();
+        }
+
+        var prog = this._loadingProg;
+        var elapsed = (performance.now() - this._loadingStartTime) / 1000.0;
+        // Fake progress that approaches 100% asymptotically
+        var progress = 1.0 - Math.exp(-elapsed / 15.0);
+
+        gl.viewport(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight);
+        gl.disable(gl.DEPTH_TEST);
+        gl.disable(gl.BLEND);
+
+        gl.useProgram(prog);
+        gl.bindBuffer(gl.ARRAY_BUFFER, this._loadingBuf);
+        gl.enableVertexAttribArray(this._loadingPosLoc);
+        gl.enableVertexAttribArray(this._loadingUVLoc);
+        gl.vertexAttribPointer(this._loadingPosLoc, 2, gl.FLOAT, false, 16, 0);
+        gl.vertexAttribPointer(this._loadingUVLoc, 2, gl.FLOAT, false, 16, 8);
+        gl.uniform1f(this._loadingTimeLoc, elapsed);
+        gl.uniform1f(this._loadingProgressLoc, progress);
+        gl.drawArrays(gl.TRIANGLE_FAN, 0, 4);
+
+        // Disable attribs to not interfere with native GL
+        gl.disableVertexAttribArray(this._loadingPosLoc);
+        gl.disableVertexAttribArray(this._loadingUVLoc);
+    }
+
+    // ================================================================
     // STATS & DEBUG
     // ================================================================
 
