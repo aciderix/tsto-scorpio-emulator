@@ -1078,6 +1078,13 @@ class ScorpioEngine {
             }
         }
 
+        // v23: Write singleton pointer to 0x1A45728 IMMEDIATELY before OGLESRender
+        // The dispatch at 0x12C30C4 reads this global and returns it.
+        // Previous write (in per-frame setup) gets cleared during OGLESRenderGLLoadingScreen ARM execution.
+        if (this.savedSingletonPtr) {
+            this._writeU32ToEmu(this.BASE + 0x1A45728, this.savedSingletonPtr);
+        }
+
         var frameResult = this.callFunction('Java_com_bight_android_jni_BGCoreJNIBridge_OGLESRender',
             this.jni.prepareCall('OGLESRender'));
 
@@ -1085,7 +1092,7 @@ class ScorpioEngine {
         // With flag=1 (loading mode), OGLESRender should run longer (calls loading screen renderer)
         var oglesInsns = frameResult ? frameResult.instructions || 0 : 0;
         if (oglesInsns < 1000 && this.savedSingletonPtr) {
-            Logger.warn('[v22] OGLESRender returned early (' + oglesInsns + ' insns) — bypassing to direct render call at 0x12C33C0');
+            Logger.warn('[v23] OGLESRender returned early (' + oglesInsns + ' insns) — bypassing to direct loading renderer at 0x12C2F34');
 
             // Analyze the trace to find the early-return branch
             if (this._traceLog.length > 0 && !this._v22TraceCaptureDone) {
@@ -1124,31 +1131,31 @@ class ScorpioEngine {
                 }
             }
 
-            // === DIRECT RENDER CALL ===
-            // Re-force all state flags before direct call
-            this.emu.mem_write(this.BASE + 0x1A466A8, [1]); // loading mode
-            this.emu.mem_write(this.savedSingletonPtr + 0xD1B, [0]);
-            this.emu.mem_write(this.savedSingletonPtr + 0xD1C, [1]); // 1 = enter render body
+            // === v23: DIRECT LOADING SCREEN RENDER CALL ===
+            // Call the actual loading screen renderer at 0x12C2F34 directly
+            // This function takes R0 = singleton pointer (same object stored at 0x1A45728)
+            // It accesses offsets +0xD20, +0xD24, +0xD28, +0xD30, +0xD34, +0x1B0, +0x1AC, etc.
+            this._writeU32ToEmu(this.BASE + 0x1A45728, this.savedSingletonPtr);
             this.emu.mem_write(this.savedSingletonPtr + 4, [1]);
             this.emu.mem_write(this.savedSingletonPtr + 5, [0]);
 
-            // Enable trace for the direct call too
+            // Enable trace for the direct call
             this._traceEnabled = true;
             this._traceLog = [];
             this._traceInsnsCount = 0;
             this._traceMaxInsns = 500;
 
-            Logger.info('[v22] Calling 0x12C33C0 directly with R0=singletonPtr (0x' + this.savedSingletonPtr.toString(16) + ')');
-            var directResult = this.callAddress(this.BASE + 0x12C33C0, {
+            Logger.info('[v23] Calling loading renderer 0x12C2F34 directly with R0=singletonPtr (0x' + this.savedSingletonPtr.toString(16) + ')');
+            var directResult = this.callAddress(this.BASE + 0x12C2F34, {
                 r0: this.savedSingletonPtr
             }, this.maxFrameInsns);
 
-            Logger.info('[v22] Direct render result: ' + directResult.instructions + ' insns, R0=0x' + (directResult.r0 >>> 0).toString(16) +
+            Logger.info('[v23] Loading renderer result: ' + directResult.instructions + ' insns, R0=0x' + (directResult.r0 >>> 0).toString(16) +
                 ' endPC=0x' + (directResult.endPC >>> 0).toString(16));
 
             // Log direct call trace
             if (this._traceLog.length > 0) {
-                Logger.info('[v22] === DIRECT 0x12C33C0 TRACE (' + this._traceLog.length + ' instructions) ===');
+                Logger.info('[v23] === LOADING RENDERER 0x12C2F34 TRACE (' + this._traceLog.length + ' instructions) ===');
                 // Log first 20 instructions
                 for (var m = 0; m < Math.min(20, this._traceLog.length); m++) {
                     var t = this._traceLog[m];
@@ -1159,7 +1166,7 @@ class ScorpioEngine {
                 }
                 // Log last 10 if different
                 if (this._traceLog.length > 30) {
-                    Logger.info('[v22] Last 10 instructions of direct call:');
+                    Logger.info('[v23] Last 10 instructions of loading renderer:');
                     var dstart = this._traceLog.length - 10;
                     for (var dm = dstart; dm < this._traceLog.length; dm++) {
                         var dt = this._traceLog[dm];
