@@ -9,10 +9,16 @@
  *       ARM code can now load shader files from the virtual filesystem
  */
 const AndroidShims = {
-    // Heap management
+    // Heap management with free-list recycling
     _heapPtr: 0xD0100000,
     _heapBase: 0xD0000000,
     _heapSize: 64 * 1024 * 1024,
+    _freeList: [],          // [{addr, size}] sorted by size for best-fit
+    _allocSizes: new Map(), // addr -> allocated size (for free/realloc)
+    _allocCount: 0,
+    _freeCount: 0,
+    _recycledCount: 0,
+    _recycledBytes: 0,
 
     // String storage for JNI/libc
     _strings: new Map(),
@@ -21,40 +27,153 @@ const AndroidShims = {
     // v2.1: VFS reference (set by engine)
     vfs: null,
 
+    // v24: Thread execution queue and condition variable tracking
+    _pendingThreads: [],
+    _threadsDone: new Set(),   // set of thread IDs that have completed
+    _condSignaled: new Set(),  // set of cond var addresses that have been signaled
+    _nextThreadId: 100,
+    _threadExecCount: 0,
+
+    // v24: dlsym stub allocation
+    _dlsymStubs: new Map(),    // symbol name -> stub address
+    _nextDlsymAddr: 0xE0010000,
+
     init(engine) {
         this.engine = engine;
         this.vfs = engine.vfs || null;
-        Logger.info('Android shims v2.1 initialized (real memcpy/strlen + VFS file I/O)');
+        this._freeList = [];
+        this._allocSizes = new Map();
+        this._pendingThreads = [];
+        this._threadsDone = new Set();
+        this._condSignaled = new Set();
+        this._dlsymStubs = new Map();
+        Logger.info('Android shims v2.4 initialized (free-list heap + thread exec + dlsym stubs)');
     },
 
     malloc(size) {
+        if (!size || size <= 0) return 0;
         var aligned = (size + 7) & ~7;
+
+        // Try to recycle from free-list (best-fit)
+        var bestIdx = -1;
+        var bestWaste = Infinity;
+        for (var i = 0; i < this._freeList.length; i++) {
+            var block = this._freeList[i];
+            if (block.size >= aligned && block.size - aligned < bestWaste) {
+                bestIdx = i;
+                bestWaste = block.size - aligned;
+                if (bestWaste === 0) break; // perfect fit
+            }
+        }
+        if (bestIdx >= 0) {
+            var recycled = this._freeList.splice(bestIdx, 1)[0];
+            this._allocSizes.set(recycled.addr, recycled.size);
+            this._recycledCount++;
+            this._recycledBytes += recycled.size;
+            this._allocCount++;
+            return recycled.addr;
+        }
+
+        // Allocate from heap
         var ptr = this._heapPtr;
         this._heapPtr += aligned;
         if (this._heapPtr >= this._heapBase + this._heapSize) {
-            Logger.error('Heap exhausted!');
+            // Emergency: compact free list and try again
+            Logger.error('Heap pressure! ' + this._freeList.length + ' free blocks, ' +
+                         Math.round((this._heapPtr - this._heapBase) / 1048576) + 'MB used');
             return 0;
         }
+        this._allocSizes.set(ptr, aligned);
+        this._allocCount++;
         return ptr;
     },
 
-    free(ptr) { /* no-op */ },
+    free(ptr) {
+        if (!ptr || ptr === 0) return;
+        var size = this._allocSizes.get(ptr);
+        if (size) {
+            this._allocSizes.delete(ptr);
+            this._freeList.push({ addr: ptr, size: size });
+            this._freeCount++;
+            // Limit free list size to avoid O(n) scan overhead
+            if (this._freeList.length > 10000) {
+                // Drop smallest blocks (least useful)
+                this._freeList.sort(function(a, b) { return b.size - a.size; });
+                this._freeList.length = 5000;
+            }
+        }
+    },
 
     calloc(count, size) {
         var total = count * size;
         var ptr = this.malloc(total);
-        // Zero the memory
-        if (ptr && total > 0 && total < 1048576 && this.engine && this.engine.emu) {
+        if (ptr && total > 0 && this.engine && this.engine.emu) {
             try {
-                var zeros = new Array(Math.min(total, 4096)).fill(0);
-                this.engine.emu.mem_write(ptr, zeros);
+                // Zero in 4KB chunks
+                var remaining = total;
+                var offset = 0;
+                while (remaining > 0) {
+                    var chunk = Math.min(remaining, 4096);
+                    var zeros = new Array(chunk).fill(0);
+                    this.engine.emu.mem_write(ptr + offset, zeros);
+                    offset += chunk;
+                    remaining -= chunk;
+                }
             } catch(e) {}
         }
         return ptr;
     },
 
     realloc(ptr, size) {
-        return this.malloc(size);
+        if (!ptr || ptr === 0) return this.malloc(size);
+        if (!size || size <= 0) { this.free(ptr); return 0; }
+        var oldSize = this._allocSizes.get(ptr) || 0;
+        var aligned = (size + 7) & ~7;
+        // If existing block is big enough, keep it
+        if (oldSize >= aligned) return ptr;
+        // Allocate new, copy old data, free old
+        var newPtr = this.malloc(size);
+        if (newPtr && oldSize > 0 && this.engine && this.engine.emu) {
+            try {
+                var copySize = Math.min(oldSize, size);
+                var data = this.engine.emu.mem_read(ptr, copySize);
+                this.engine.emu.mem_write(newPtr, data);
+            } catch(e) {}
+        }
+        this.free(ptr);
+        return newPtr;
+    },
+
+    /**
+     * v24: Execute pending thread routines synchronously.
+     * Called by the engine after init steps to run background work.
+     */
+    runPendingThreads(maxCount) {
+        maxCount = maxCount || 10;
+        var ran = 0;
+        while (this._pendingThreads.length > 0 && ran < maxCount) {
+            var thread = this._pendingThreads.shift();
+            if (!thread.func || thread.executed) continue;
+            thread.executed = true;
+            this._threadExecCount++;
+            Logger.info('[PTHREAD] Executing thread routine 0x' + (thread.func >>> 0).toString(16) +
+                        ' arg=0x' + (thread.arg >>> 0).toString(16));
+            try {
+                var result = this.engine.callAddress(thread.func, {
+                    r0: thread.arg
+                }, 500000); // 500K instruction limit per thread
+                Logger.info('[PTHREAD] Thread completed: ' + (result.instructions || 0) + ' insns, ' +
+                            'R0=0x' + ((result.r0 || 0) >>> 0).toString(16));
+                this._threadsDone.add(thread.id);
+                // Signal any condition variables that threads might be waiting on
+                this._condSignaled.add(0xFFFFFFFF); // broadcast "a thread completed"
+            } catch(e) {
+                Logger.warn('[PTHREAD] Thread execution failed: ' + e.message);
+                this._threadsDone.add(thread.id);
+            }
+            ran++;
+        }
+        return ran;
     },
 
     storeString(str) {
@@ -1051,47 +1170,109 @@ const AndroidShims = {
             'pthread_mutex_trylock': function(emu, args) { return 0; },
             'pthread_create': function(emu, args) {
                 // args: [thread_ptr, attr, start_routine, arg]
-                var threadPtr = args[0], attr = args[1], startRoutine = args[2], threadArg = args[3];
-                Logger.warn('[PTHREAD] pthread_create: thread_ptr=0x' + (threadPtr>>>0).toString(16) +
-                    ' start_routine=0x' + (startRoutine>>>0).toString(16) +
+                var threadPtr = args[0], startRoutine = args[2], threadArg = args[3];
+                var threadId = self._nextThreadId++;
+                Logger.info('[PTHREAD] pthread_create: id=' + threadId +
+                    ' routine=0x' + (startRoutine>>>0).toString(16) +
                     ' arg=0x' + (threadArg>>>0).toString(16));
-                // Store thread info for potential later execution
-                if (!self._pendingThreads) self._pendingThreads = [];
-                self._pendingThreads.push({ func: startRoutine, arg: threadArg });
-                // Write a fake thread ID
+                self._pendingThreads.push({
+                    id: threadId,
+                    func: startRoutine,
+                    arg: threadArg,
+                    executed: false
+                });
+                // Write thread ID
                 if (threadPtr) {
-                    try { engine.emu.mem_write(threadPtr, [self._pendingThreads.length, 0, 0, 0]); } catch(e) {}
+                    try {
+                        self.engine.emu.mem_write(threadPtr, [
+                            threadId & 0xFF, (threadId >> 8) & 0xFF,
+                            (threadId >> 16) & 0xFF, (threadId >> 24) & 0xFF
+                        ]);
+                    } catch(e) {}
                 }
                 return 0;
             },
-            'pthread_join':          function(emu, args) { return 0; },
+            'pthread_join': function(emu, args) {
+                // If the thread hasn't run yet, run pending threads now
+                var tid = args[0];
+                if (!self._threadsDone.has(tid) && self._pendingThreads.length > 0) {
+                    Logger.info('[PTHREAD] pthread_join(tid=' + tid + ') — running pending threads...');
+                    self.runPendingThreads(5);
+                }
+                return 0;
+            },
             'pthread_detach':        function(emu, args) { return 0; },
             'pthread_self':          function(emu, args) { return 1; },
-            'pthread_exit':          function(emu, args) { return 0; },
-            'pthread_once':          function(emu, args) { return 0; },
+            'pthread_exit': function(emu, args) {
+                // Stop emulation for this thread routine
+                try { self.engine.emu.emu_stop(); } catch(e) {}
+                return 0;
+            },
+            'pthread_once': function(emu, args) {
+                // args[0] = once_control, args[1] = init_routine
+                if (args[0]) {
+                    try {
+                        var val = self.engine.emu.mem_read(args[0], 4);
+                        var done = val[0] | (val[1] << 8) | (val[2] << 16) | (val[3] << 24);
+                        if (done !== 0) return 0; // already called
+                        self.engine.emu.mem_write(args[0], [1, 0, 0, 0]); // mark done
+                    } catch(e) {}
+                }
+                // Execute the init routine
+                if (args[1]) {
+                    Logger.info('[PTHREAD] pthread_once: calling 0x' + (args[1]>>>0).toString(16));
+                    try {
+                        self.engine.callAddress(args[1], {}, 100000);
+                    } catch(e) {
+                        Logger.warn('[PTHREAD] pthread_once routine failed: ' + e.message);
+                    }
+                }
+                return 0;
+            },
             'pthread_cond_init':     function(emu, args) { return 0; },
             'pthread_cond_wait': function(emu, args) {
                 if (!self._condWaitCount) self._condWaitCount = 0;
                 self._condWaitCount++;
-                if (self._condWaitCount <= 5 || self._condWaitCount % 10000 === 0) {
-                    Logger.warn('[PTHREAD] pthread_cond_wait #' + self._condWaitCount +
-                        ' cond=0x' + (args[0]>>>0).toString(16) +
-                        ' mutex=0x' + (args[1]>>>0).toString(16));
+                var condAddr = args[0] >>> 0;
+                // Check if this condition was signaled
+                if (self._condSignaled.has(condAddr) || self._condSignaled.has(0xFFFFFFFF)) {
+                    self._condSignaled.delete(condAddr);
+                    return 0; // condition met
                 }
+                // Run pending threads to make progress (they may signal us)
+                if (self._pendingThreads.length > 0) {
+                    self.runPendingThreads(3);
+                    if (self._condSignaled.has(condAddr) || self._condSignaled.has(0xFFFFFFFF)) {
+                        self._condSignaled.delete(condAddr);
+                        return 0;
+                    }
+                }
+                if (self._condWaitCount <= 10) {
+                    Logger.info('[PTHREAD] pthread_cond_wait #' + self._condWaitCount +
+                        ' cond=0x' + condAddr.toString(16));
+                }
+                return 0; // can't actually block in single-threaded JS
+            },
+            'pthread_cond_signal': function(emu, args) {
+                self._condSignaled.add(args[0] >>> 0);
                 return 0;
             },
-            'pthread_cond_signal':   function(emu, args) { return 0; },
-            'pthread_cond_broadcast':function(emu, args) { return 0; },
+            'pthread_cond_broadcast': function(emu, args) {
+                self._condSignaled.add(args[0] >>> 0);
+                return 0;
+            },
             'pthread_cond_destroy':  function(emu, args) { return 0; },
             'pthread_cond_timedwait': function(emu, args) {
-                if (!self._condTimedWaitCount) self._condTimedWaitCount = 0;
-                self._condTimedWaitCount++;
-                if (self._condTimedWaitCount <= 5 || self._condTimedWaitCount % 10000 === 0) {
-                    Logger.warn('[PTHREAD] pthread_cond_timedwait #' + self._condTimedWaitCount +
-                        ' cond=0x' + (args[0]>>>0).toString(16) +
-                        ' mutex=0x' + (args[1]>>>0).toString(16));
+                var condAddr = args[0] >>> 0;
+                // Same as cond_wait but with timeout — just run pending threads
+                if (self._pendingThreads.length > 0) {
+                    self.runPendingThreads(3);
                 }
-                return 0;
+                if (self._condSignaled.has(condAddr) || self._condSignaled.has(0xFFFFFFFF)) {
+                    self._condSignaled.delete(condAddr);
+                    return 0;
+                }
+                return 110; // ETIMEDOUT — signal timeout so caller doesn't infinite-loop
             },
             'pthread_attr_init':     function(emu, args) { return 0; },
             'pthread_attr_destroy':  function(emu, args) { return 0; },
@@ -1122,7 +1303,7 @@ const AndroidShims = {
                 // Write a fake key value
                 if (args[0]) {
                     if (!self._nextTlsKey) self._nextTlsKey = 1;
-                    try { engine.emu.mem_write(args[0], [self._nextTlsKey & 0xFF, 0, 0, 0]); } catch(e) {}
+                    try { self.engine.emu.mem_write(args[0], [self._nextTlsKey & 0xFF, 0, 0, 0]); } catch(e) {}
                     self._nextTlsKey++;
                 }
                 return 0;
@@ -1153,7 +1334,11 @@ const AndroidShims = {
                 return 0;
             },
             'setenv':       function(emu, args) { return 0; },
-            'abort':        function(emu, args) { Logger.error('abort() called!'); return 0; },
+            'abort': function(emu, args) {
+                Logger.error('abort() called! Stopping emulation.');
+                try { self.engine.emu.emu_stop(); } catch(e) {}
+                return 0;
+            },
             '__stack_chk_fail': function(emu, args) { Logger.warn('Stack canary fail (ignored)'); return 0; },
             '__cxa_finalize':   function(emu, args) { return 0; },
             '__cxa_atexit':     function(emu, args) { return 0; },
@@ -1189,11 +1374,41 @@ const AndroidShims = {
             'AndroidBitmap_lockPixels':  function(emu, args) { return 0; },
             'AndroidBitmap_unlockPixels':function(emu, args) { return 0; },
 
-            // dlsym — return 0 (symbol not found)
+            // dlsym — return stub function pointer (not 0!)
             'dlsym': function(emu, args) {
                 var name = self._readCString(emu, args[1]);
-                Logger.info('[dlsym] ' + name);
-                return 0;
+                // Check if we already have a stub for this symbol
+                var existing = self._dlsymStubs.get(name);
+                if (existing) return existing;
+                // Check if it's a shimmed function we know about
+                if (self.engine._findShimForName && self.engine._findShimForName(name)) {
+                    var addr = self.engine._findShimForName(name);
+                    Logger.info('[dlsym] ' + name + ' → shim 0x' + (addr>>>0).toString(16));
+                    self._dlsymStubs.set(name, addr);
+                    return addr;
+                }
+                // Check if it's an exported symbol in the binary
+                if (self.engine.elf && self.engine.elf.exports) {
+                    var sym = self.engine.elf.exports[name];
+                    if (sym && sym.value) {
+                        var addr = self.engine.BASE + sym.value;
+                        Logger.info('[dlsym] ' + name + ' → binary 0x' + (addr>>>0).toString(16));
+                        self._dlsymStubs.set(name, addr);
+                        return addr;
+                    }
+                }
+                // Allocate a generic stub that returns 0 (better than NULL pointer)
+                var stubAddr = self._nextDlsymAddr;
+                self._nextDlsymAddr += 8;
+                try {
+                    self.engine.emu.mem_write(stubAddr, [
+                        0x00, 0x00, 0xA0, 0xE3,  // MOV R0, #0
+                        0x1E, 0xFF, 0x2F, 0xE1   // BX LR
+                    ]);
+                } catch(e) {}
+                self._dlsymStubs.set(name, stubAddr);
+                Logger.info('[dlsym] ' + name + ' → new stub 0x' + (stubAddr>>>0).toString(16));
+                return stubAddr;
             },
             'dlopen':  function(emu, args) {
                 var path = self._readCString(emu, args[0]);
@@ -1243,9 +1458,9 @@ const AndroidShims = {
                 // Static local variable guard — check if already initialized
                 if (args[0]) {
                     try {
-                        var guardBuf = engine.emu.mem_read(args[0], 1);
+                        var guardBuf = self.engine.emu.mem_read(args[0], 1);
                         if (guardBuf[0] !== 0) return 0; // already initialized
-                        engine.emu.mem_write(args[0], [1]); // mark as initializing
+                        self.engine.emu.mem_write(args[0], [1]); // mark as initializing
                     } catch(e) {}
                 }
                 return 1; // needs initialization
@@ -1689,11 +1904,13 @@ const AndroidShims = {
             'strerror_r': function(emu, args) { return -1; },
             'perror': function(emu, args) { return 0; },
             'exit': function(emu, args) {
-                Logger.warn('[exit] called with code ' + args[0]);
+                Logger.error('[exit] called with code ' + args[0] + ' — stopping emulation');
+                try { self.engine.emu.emu_stop(); } catch(e) {}
                 return 0;
             },
             '_exit': function(emu, args) {
-                Logger.warn('[_exit] called with code ' + args[0]);
+                Logger.error('[_exit] called with code ' + args[0] + ' — stopping emulation');
+                try { self.engine.emu.emu_stop(); } catch(e) {}
                 return 0;
             },
 

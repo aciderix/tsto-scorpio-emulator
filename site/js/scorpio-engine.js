@@ -890,6 +890,23 @@ class ScorpioEngine {
             r1: this.jni.JOBJECT_BASE,
         }, true));
 
+        // === v24: Execute pending background threads ===
+        // pthread_create stores routines but doesn't run them (single-threaded emulator).
+        // Run them now so asset loaders, initialization threads, etc. complete.
+        if (AndroidShims._pendingThreads && AndroidShims._pendingThreads.length > 0) {
+            Logger.info('v24: Running ' + AndroidShims._pendingThreads.length + ' pending thread routines...');
+            var threadsRan = AndroidShims.runPendingThreads(20);
+            Logger.info('v24: Executed ' + threadsRan + ' threads, ' +
+                        AndroidShims._pendingThreads.length + ' remaining');
+        }
+
+        // === v24: Log heap stats ===
+        Logger.info('v24 Heap: ' + AndroidShims._allocCount + ' allocs, ' +
+                    AndroidShims._freeCount + ' frees, ' +
+                    AndroidShims._recycledCount + ' recycled (' +
+                    Math.round(AndroidShims._recycledBytes / 1024) + ' KB), ' +
+                    Math.round((AndroidShims._heapPtr - AndroidShims._heapBase) / 1048576) + 'MB used');
+
         // === v13.2: Force-enable rendering ===
         // The game's render function checks a flag at singleton+0xD1B
         // This byte is normally set by internal async loading, which we can't emulate
