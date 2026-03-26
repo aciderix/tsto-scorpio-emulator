@@ -75,6 +75,20 @@
                     await dlcLoader.loadManifest();
                     engine.dlcLoader = dlcLoader;
                     window._dlcLoader = dlcLoader;
+
+                    // v27d: Pre-load critical DLC packages that must exist before ARM init
+                    // The game reads res-core/0 index, then expects textpool files in VFS.
+                    // Without textpool, game shows "*NO TEXT POOL" and calls closeApp().
+                    const criticalDLC = ['textpools-en', 'gamescripts'];
+                    Logger.info('[DLC] Pre-loading critical packages: ' + criticalDLC.join(', '));
+                    for (const dir of criticalDLC) {
+                        try {
+                            const count = await dlcLoader.loadPackage(dir);
+                            Logger.info('[DLC] Pre-loaded ' + dir + ': ' + count + ' files');
+                        } catch (e) {
+                            Logger.warn('[DLC] Failed to pre-load ' + dir + ': ' + e.message);
+                        }
+                    }
                 }
             }
 
