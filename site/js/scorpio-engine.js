@@ -791,8 +791,9 @@ class ScorpioEngine {
         var startInsns = this.totalInstructions;
 
         try {
-            // v15.2: Init mode uses 2M (enough for shader loading), game frames use configurable limit
-            var maxInsns = initMode ? 2000000 : this.maxFrameInsns;
+            // v27: Init mode uses 20M — ScorpioJNI_init needs >2M to fully complete (was truncated at 2M,
+            // preventing thread creation and network init). Game frames use configurable limit.
+            var maxInsns = initMode ? 20000000 : this.maxFrameInsns;
             // v17: Use RETURN_SENTINEL as stop address — distinct from GENERIC_RETURN
             var stopAddr = this.RETURN_SENTINEL;
             if (isThumb) {
@@ -1233,6 +1234,15 @@ class ScorpioEngine {
         this._pcSamples = {}; // reset PC sampling for this frame
         this._writeGenericReturnStub();
         this._writeReturnSentinelStub();
+
+        // v27: Execute any pending threads each frame (threads may be created during render)
+        if (AndroidShims._pendingThreads && AndroidShims._pendingThreads.length > 0) {
+            var threadCount = AndroidShims._pendingThreads.length;
+            var threadsRan = AndroidShims.runPendingThreads(5);
+            if (threadsRan > 0) {
+                Logger.info('[v27] Ran ' + threadsRan + '/' + threadCount + ' pending threads during frame');
+            }
+        }
 
         // v22: Call OGLESRenderGLLoadingScreen FIRST — this renders the loading/splash screen
         // while the scene graph is empty. Then also call OGLESRender for the main scene.
