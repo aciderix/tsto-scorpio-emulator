@@ -90,9 +90,25 @@ class JNIBridge {
         // JNIEnv* → vtable (correct single indirection)
         this._writeU32(this.JNIENV_BASE, this.JNIENV_VTABLE);
 
-        // Fill vtable with default return stub
-        for (var i = 0; i < 256; i++) {
-            this._writeU32(this.JNIENV_VTABLE + i * 4, this.RETURN_STUB);
+        // Fill vtable with unique addresses per slot (for debugging unhandled JNI calls)
+        // Each slot gets RETURN_STUB + slot*4 — all map to the same page with BX LR
+        this.JNI_STUB_BASE = 0xE0080000; // dedicated JNI stub page
+        try {
+            emu.mem_map(this.JNI_STUB_BASE, 0x1000, uc.PROT_ALL);
+            // Write MOV R0, #0; BX LR at each 8-byte aligned slot
+            for (var i = 0; i < 256; i++) {
+                var stubAddr = this.JNI_STUB_BASE + i * 8;
+                emu.mem_write(stubAddr, [
+                    0x00, 0x00, 0xA0, 0xE3,  // MOV R0, #0
+                    0x1E, 0xFF, 0x2F, 0xE1,  // BX LR
+                ]);
+                this._writeU32(this.JNIENV_VTABLE + i * 4, stubAddr);
+            }
+        } catch(e) {
+            // Fallback: use generic return stub
+            for (var i = 0; i < 256; i++) {
+                this._writeU32(this.JNIENV_VTABLE + i * 4, this.RETURN_STUB);
+            }
         }
 
         // JavaVM* → vtable

@@ -507,6 +507,37 @@ class ScorpioEngine {
                     // v13.2: RETURN_SENTINEL reached — function returned cleanly
                     // emu_start will stop here since this is the stop address
                     Logger.arm('↩ RETURN_SENTINEL reached — function returned cleanly');
+                } else if (self.jni && self.jni.JNI_STUB_BASE && addr >= self.jni.JNI_STUB_BASE && addr < self.jni.JNI_STUB_BASE + 0x1000) {
+                    // v26b: JNI stub — identify which vtable slot was called
+                    var slot = (addr - self.jni.JNI_STUB_BASE) / 8;
+                    var lr = self._readReg(uc.ARM_REG_LR);
+                    var r0 = self._readReg(uc.ARM_REG_R0);
+                    var r1 = self._readReg(uc.ARM_REG_R1);
+                    // JNI function names by slot number
+                    var jniNames = {
+                        6: 'FindClass', 10: 'GetSuperclass', 15: 'ExceptionOccurred',
+                        16: 'ExceptionDescribe', 17: 'ExceptionClear', 21: 'NewGlobalRef',
+                        28: 'NewObject', 31: 'GetObjectClass', 33: 'GetMethodID',
+                        34: 'CallObjectMethod', 37: 'CallBooleanMethod',
+                        49: 'CallIntMethod', 61: 'CallVoidMethod',
+                        94: 'GetFieldID', 95: 'GetObjectField', 96: 'GetBooleanField',
+                        97: 'GetByteField', 100: 'GetIntField', 102: 'GetLongField',
+                        104: 'GetFloatField', 113: 'GetStaticMethodID',
+                        114: 'CallStaticObjectMethod', 117: 'CallStaticBooleanMethod',
+                        129: 'CallStaticIntMethod', 141: 'CallStaticVoidMethod',
+                        144: 'GetStaticFieldID', 145: 'GetStaticObjectField',
+                        154: 'GetStaticIntField', 167: 'NewStringUTF',
+                        169: 'GetStringUTFChars', 171: 'GetArrayLength',
+                        228: 'ExceptionCheck'
+                    };
+                    var name = jniNames[slot] || 'JNI#' + slot;
+                    if (!self._jniStubCounts) self._jniStubCounts = {};
+                    var cnt = self._jniStubCounts[slot] || 0;
+                    self._jniStubCounts[slot] = cnt + 1;
+                    if (cnt < 3) {
+                        Logger.warn('[JNI-STUB] Unhandled JNI slot ' + slot + ' (' + name + ') from LR=0x' + (lr>>>0).toString(16) +
+                            ' R0=0x' + (r0>>>0).toString(16) + ' R1=0x' + (r1>>>0).toString(16));
+                    }
                 } else if (addr === self.GENERIC_RETURN || addr === self.SHIM_BASE) {
                     // v16: Generic return stub — R0 is set to 0 by ARM instructions
                     // (MOV R0, #0; BX LR). Track callers for debugging.
