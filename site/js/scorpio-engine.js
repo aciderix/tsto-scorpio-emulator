@@ -1433,6 +1433,9 @@ class ScorpioEngine {
             threadsCreated: AndroidShims._nextThreadId - 100,
             threadsExecuted: AndroidShims._threadExecCount,
             dlsymStubs: AndroidShims._dlsymStubs ? AndroidShims._dlsymStubs.size : 0,
+            netRequests: AndroidShims._netRequestCount || 0,
+            netResponses: AndroidShims._netResponseCount || 0,
+            virtualSockets: Object.keys(AndroidShims._virtualSockets || {}).length,
         };
     }
 

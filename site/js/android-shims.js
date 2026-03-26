@@ -38,16 +38,143 @@ const AndroidShims = {
     _dlsymStubs: new Map(),    // symbol name -> stub address
     _nextDlsymAddr: 0xE0010000,
 
+    // v25: Virtual socket layer for HTTP networking
+    _virtualSockets: {},
+    _nextSocketFd: 50000,  // high range to avoid VFS FD collision
+    _netRequestCount: 0,
+    _netResponseCount: 0,
+
     init(engine) {
         this.engine = engine;
         this.vfs = engine.vfs || null;
         this._freeList = [];
         this._allocSizes = new Map();
+        this._virtualSockets = {};
+        this._nextSocketFd = 50000;
+        this._netRequestCount = 0;
+        this._netResponseCount = 0;
         this._pendingThreads = [];
         this._threadsDone = new Set();
         this._condSignaled = new Set();
         this._dlsymStubs = new Map();
-        Logger.info('Android shims v2.4 initialized (free-list heap + thread exec + dlsym stubs)');
+        Logger.info('Android shims v25 initialized (free-list heap + thread exec + dlsym stubs + virtual sockets)');
+    },
+
+    // ============================================
+    // v25: HTTP Request Parser & Router
+    // ============================================
+
+    _tryProcessHttpRequest(sock) {
+        if (sock.requestDone || sock.recvBuf) return; // already processed
+        if (sock.sendBuf.length < 16) return; // too small
+
+        // Convert send buffer to string to parse HTTP headers
+        var raw = '';
+        for (var i = 0; i < Math.min(sock.sendBuf.length, 8192); i++) {
+            raw += String.fromCharCode(sock.sendBuf[i]);
+        }
+
+        // Find end of HTTP headers
+        var headerEnd = raw.indexOf('\r\n\r\n');
+        if (headerEnd < 0) return; // headers not complete yet
+
+        var headerPart = raw.substring(0, headerEnd);
+        var lines = headerPart.split('\r\n');
+        if (lines.length < 1) return;
+
+        // Parse request line: "GET /path HTTP/1.1"
+        var reqLine = lines[0].split(' ');
+        if (reqLine.length < 2) return;
+        var method = reqLine[0];
+        var url = reqLine[1];
+
+        // Parse headers
+        var headers = {};
+        for (var i = 1; i < lines.length; i++) {
+            var colonIdx = lines[i].indexOf(':');
+            if (colonIdx > 0) {
+                var key = lines[i].substring(0, colonIdx).trim().toLowerCase();
+                var val = lines[i].substring(colonIdx + 1).trim();
+                headers[key] = val;
+            }
+        }
+
+        // Check if body is complete (for POST/PUT)
+        var bodyStart = headerEnd + 4; // after \r\n\r\n
+        var contentLength = parseInt(headers['content-length']) || 0;
+        var bodyBytes = null;
+
+        if (contentLength > 0) {
+            if (sock.sendBuf.length < bodyStart + contentLength) {
+                return; // body not complete yet
+            }
+            bodyBytes = new Uint8Array(sock.sendBuf.slice(bodyStart, bodyStart + contentLength));
+        }
+
+        sock.requestDone = true;
+        this._netRequestCount++;
+
+        Logger.info('[NET] HTTP Request: ' + method + ' ' + url + ' (body=' + (contentLength || 0) + ' bytes)');
+
+        // Route to GameServer
+        var response;
+        try {
+            response = GameServer.handleRequest(method, url, headers, bodyBytes);
+        } catch(e) {
+            Logger.error('[NET] GameServer error: ' + e.message);
+            response = { status: 500, headers: { 'Content-Type': 'text/plain' }, body: 'Internal Server Error' };
+        }
+
+        // Build HTTP response
+        var status = response.status || 200;
+        var respHeaders = response.headers || {};
+        var respBody;
+
+        if (response.bodyBytes) {
+            respBody = response.bodyBytes;
+        } else if (response.body) {
+            // Convert string to bytes
+            var str = response.body;
+            var bytes = [];
+            for (var i = 0; i < str.length; i++) {
+                var c = str.charCodeAt(i);
+                if (c < 0x80) bytes.push(c);
+                else if (c < 0x800) { bytes.push(0xC0 | (c >> 6)); bytes.push(0x80 | (c & 0x3F)); }
+                else { bytes.push(0xE0 | (c >> 12)); bytes.push(0x80 | ((c >> 6) & 0x3F)); bytes.push(0x80 | (c & 0x3F)); }
+            }
+            respBody = new Uint8Array(bytes);
+        } else {
+            respBody = new Uint8Array(0);
+        }
+
+        // Status text
+        var statusTexts = { 200: 'OK', 201: 'Created', 302: 'Found', 400: 'Bad Request', 403: 'Forbidden', 404: 'Not Found', 500: 'Internal Server Error' };
+        var statusText = statusTexts[status] || 'OK';
+
+        // Build response header string
+        var respLine = 'HTTP/1.1 ' + status + ' ' + statusText + '\r\n';
+        respLine += 'Content-Length: ' + respBody.length + '\r\n';
+        respLine += 'Connection: close\r\n';
+        for (var key in respHeaders) {
+            respLine += key.charAt(0).toUpperCase() + key.slice(1) + ': ' + respHeaders[key] + '\r\n';
+        }
+        respLine += '\r\n';
+
+        // Convert header to bytes and concat with body
+        var headerBytes = [];
+        for (var i = 0; i < respLine.length; i++) {
+            headerBytes.push(respLine.charCodeAt(i));
+        }
+
+        var fullResponse = new Uint8Array(headerBytes.length + respBody.length);
+        fullResponse.set(headerBytes, 0);
+        fullResponse.set(respBody, headerBytes.length);
+
+        sock.recvBuf = fullResponse;
+        sock.recvOffset = 0;
+        this._netResponseCount++;
+
+        Logger.info('[NET] HTTP Response: ' + status + ' ' + statusText + ' (' + respBody.length + ' bytes body)');
     },
 
     malloc(size) {
@@ -988,24 +1115,7 @@ const AndroidShims = {
                 Logger.info('[open] MISS: ' + path);
                 return -1;
             },
-            'close':   function(emu, args) {
-                var fd = args[0];
-                if (self.vfs && fd >= 100) {
-                    return self.vfs.fclose(fd);
-                }
-                return 0;
-            },
-            'read':    function(emu, args) {
-                var fd = args[0];
-                var destPtr = args[1];
-                var count = args[2];
-                
-                if (self.vfs && fd >= 100) {
-                    return self.vfs.fread(fd, destPtr, 1, count, emu) * 1; // bytes read
-                }
-                return 0;
-            },
-            'write':   function(emu, args) { return args[2]; },
+            // close/read/write defined in v25 virtual socket section below
             'lseek':   function(emu, args) {
                 var fd = args[0];
                 var offset = args[1] | 0;
@@ -1872,21 +1982,256 @@ const AndroidShims = {
             'opendir': function(emu, args) { return 0; },
             'readdir': function(emu, args) { return 0; },
             'closedir': function(emu, args) { return 0; },
-            'socket': function(emu, args) { return -1; },
-            'connect': function(emu, args) { return -1; },
-            'send': function(emu, args) { return -1; },
-            'recv': function(emu, args) { return -1; },
-            'bind': function(emu, args) { return -1; },
-            'listen': function(emu, args) { return -1; },
+            // ============================================
+            // v25: VIRTUAL SOCKET LAYER — HTTP networking
+            // ============================================
+            'socket': function(emu, args) {
+                var domain = args[0], type = args[1], protocol = args[2];
+                var fd = self._nextSocketFd++;
+                self._virtualSockets[fd] = {
+                    state: 'created',
+                    host: '',
+                    port: 0,
+                    sendBuf: [],      // accumulated bytes from send()
+                    recvBuf: null,    // Uint8Array of HTTP response
+                    recvOffset: 0,
+                    requestDone: false
+                };
+                Logger.info('[NET] socket() → fd=' + fd + ' (domain=' + domain + ' type=' + type + ')');
+                return fd;
+            },
+            'connect': function(emu, args) {
+                var fd = args[0], addrPtr = args[1], addrLen = args[2];
+                var sock = self._virtualSockets[fd];
+                if (!sock) { Logger.warn('[NET] connect() unknown fd=' + fd); return -1; }
+                try {
+                    var data = emu.mem_read(addrPtr, 16);
+                    // sockaddr_in: family(2 LE) + port(2 BE) + ip(4)
+                    var port = (data[2] << 8) | data[3];
+                    var ip = data[4] + '.' + data[5] + '.' + data[6] + '.' + data[7];
+                    sock.host = ip;
+                    sock.port = port;
+                    sock.state = 'connected';
+                    Logger.info('[NET] connect() fd=' + fd + ' → ' + ip + ':' + port);
+                } catch(e) {
+                    sock.state = 'connected';
+                    Logger.warn('[NET] connect() fd=' + fd + ' could not parse addr');
+                }
+                return 0; // success
+            },
+            'send': function(emu, args) {
+                var fd = args[0], bufPtr = args[1], len = args[2], flags = args[3];
+                var sock = self._virtualSockets[fd];
+                if (!sock) return -1;
+                try {
+                    var data = emu.mem_read(bufPtr, len);
+                    for (var i = 0; i < data.length; i++) sock.sendBuf.push(data[i]);
+                } catch(e) { return -1; }
+
+                // Check if we have a complete HTTP request
+                self._tryProcessHttpRequest(sock);
+                return len;
+            },
+            'recv': function(emu, args) {
+                var fd = args[0], bufPtr = args[1], len = args[2], flags = args[3];
+                var sock = self._virtualSockets[fd];
+                if (!sock) return -1;
+
+                // If request wasn't processed yet, try now
+                if (!sock.recvBuf) self._tryProcessHttpRequest(sock);
+
+                if (!sock.recvBuf) {
+                    // Still no response — return 0 (connection closed gracefully)
+                    return 0;
+                }
+
+                var available = sock.recvBuf.length - sock.recvOffset;
+                if (available <= 0) return 0; // EOF
+
+                var toRead = Math.min(len, available);
+                try {
+                    var slice = sock.recvBuf.slice(sock.recvOffset, sock.recvOffset + toRead);
+                    emu.mem_write(bufPtr, Array.from(slice));
+                    sock.recvOffset += toRead;
+                } catch(e) { return -1; }
+                return toRead;
+            },
+            'write': function(emu, args) {
+                // write() can be used on sockets or VFS file descriptors
+                var fd = args[0], bufPtr = args[1], len = args[2];
+                var sock = self._virtualSockets[fd];
+                if (sock) {
+                    try {
+                        var data = emu.mem_read(bufPtr, len);
+                        for (var i = 0; i < data.length; i++) sock.sendBuf.push(data[i]);
+                    } catch(e) { return -1; }
+                    self._tryProcessHttpRequest(sock);
+                    return len;
+                }
+                // VFS file write — just pretend we wrote it
+                return len;
+            },
+            'read': function(emu, args) {
+                // read() can be used on sockets or VFS file descriptors
+                var fd = args[0], bufPtr = args[1], len = args[2];
+                var sock = self._virtualSockets[fd];
+                if (sock) {
+                    if (!sock.recvBuf) self._tryProcessHttpRequest(sock);
+                    if (!sock.recvBuf) return 0;
+                    var available = sock.recvBuf.length - sock.recvOffset;
+                    if (available <= 0) return 0;
+                    var toRead = Math.min(len, available);
+                    try {
+                        var slice = sock.recvBuf.slice(sock.recvOffset, sock.recvOffset + toRead);
+                        emu.mem_write(bufPtr, Array.from(slice));
+                        sock.recvOffset += toRead;
+                    } catch(e) { return -1; }
+                    return toRead;
+                }
+                // VFS file read
+                if (self.vfs && fd >= 100) {
+                    return self.vfs.fread(fd, bufPtr, 1, len, emu) * 1;
+                }
+                return 0;
+            },
+            'close': function(emu, args) {
+                var fd = args[0];
+                if (self._virtualSockets[fd]) {
+                    delete self._virtualSockets[fd];
+                    return 0;
+                }
+                // VFS file close
+                if (self.vfs && fd >= 100) {
+                    return self.vfs.fclose(fd);
+                }
+                return 0;
+            },
+            'shutdown': function(emu, args) { return 0; },
+            'bind': function(emu, args) { return 0; },
+            'listen': function(emu, args) { return 0; },
             'accept': function(emu, args) { return -1; },
-            'select': function(emu, args) { return 0; },
-            'poll': function(emu, args) { return 0; },
+            'select': function(emu, args) {
+                // Check if any virtual sockets have data ready
+                // nfds=args[0], readfds=args[1], writefds=args[2], exceptfds=args[3], timeout=args[4-5]
+                // Return 1 to indicate ready (simplified)
+                return 1;
+            },
+            'poll': function(emu, args) {
+                // Return 1 to indicate ready events
+                var fds_ptr = args[0], nfds = args[1];
+                if (fds_ptr && nfds > 0) {
+                    try {
+                        // Set revents = POLLIN | POLLOUT (0x0001 | 0x0004 = 0x0005)
+                        // struct pollfd: int fd(4) + short events(2) + short revents(2)
+                        for (var i = 0; i < nfds; i++) {
+                            emu.mem_write(fds_ptr + i * 8 + 6, [0x05, 0x00]);
+                        }
+                    } catch(e) {}
+                }
+                return nfds > 0 ? 1 : 0;
+            },
             'setsockopt': function(emu, args) { return 0; },
             'getsockopt': function(emu, args) { return 0; },
-            'getaddrinfo': function(emu, args) { return -1; },
-            'freeaddrinfo': function(emu, args) { return 0; },
-            'gai_strerror': function(emu, args) { return 0; },
-            'inet_addr': function(emu, args) { return 0xFFFFFFFF; },
+            'getaddrinfo': function(emu, args) {
+                // args: node(R0), service(R1), hints(R2), res_ptr(R3)
+                var nodePtr = args[0], servicePtr = args[1], hintsPtr = args[2], resPtr = args[3];
+                var hostname = nodePtr ? self._readCString(emu, nodePtr) : '';
+                var service = servicePtr ? self._readCString(emu, servicePtr) : '80';
+                var port = parseInt(service) || 80;
+
+                Logger.info('[NET] getaddrinfo("' + hostname + '", "' + service + '")');
+
+                // Allocate addrinfo struct (32 bytes) + sockaddr_in (16 bytes)
+                var aiAddr = self.malloc(32 + 16);
+                if (!aiAddr) return -1; // EAI_MEMORY
+                var saAddr = aiAddr + 32;
+
+                // Write sockaddr_in at saAddr
+                var portHi = (port >> 8) & 0xFF, portLo = port & 0xFF;
+                // Use 10.0.0.1 as virtual IP for all resolutions
+                emu.mem_write(saAddr, [
+                    2, 0,           // sin_family = AF_INET (little-endian)
+                    portHi, portLo, // sin_port (network byte order = big-endian)
+                    10, 0, 0, 1,    // sin_addr = 10.0.0.1
+                    0, 0, 0, 0, 0, 0, 0, 0  // sin_zero
+                ]);
+
+                // Write addrinfo struct at aiAddr
+                // ai_flags=0, ai_family=AF_INET=2, ai_socktype=SOCK_STREAM=1, ai_protocol=IPPROTO_TCP=6
+                // ai_addrlen=16, ai_addr=saAddr, ai_canonname=0, ai_next=0
+                var saBytes = [
+                    saAddr & 0xFF, (saAddr >> 8) & 0xFF,
+                    (saAddr >> 16) & 0xFF, (saAddr >> 24) & 0xFF
+                ];
+                emu.mem_write(aiAddr, [
+                    0, 0, 0, 0,     // ai_flags = 0
+                    2, 0, 0, 0,     // ai_family = AF_INET
+                    1, 0, 0, 0,     // ai_socktype = SOCK_STREAM
+                    6, 0, 0, 0,     // ai_protocol = IPPROTO_TCP
+                    16, 0, 0, 0,    // ai_addrlen = 16
+                    saBytes[0], saBytes[1], saBytes[2], saBytes[3], // ai_addr ptr
+                    0, 0, 0, 0,     // ai_canonname = NULL
+                    0, 0, 0, 0      // ai_next = NULL
+                ]);
+
+                // Write pointer to addrinfo at *res
+                if (resPtr) {
+                    emu.mem_write(resPtr, [
+                        aiAddr & 0xFF, (aiAddr >> 8) & 0xFF,
+                        (aiAddr >> 16) & 0xFF, (aiAddr >> 24) & 0xFF
+                    ]);
+                }
+
+                return 0; // success
+            },
+            'freeaddrinfo': function(emu, args) {
+                if (args[0]) self.free(args[0]);
+                return 0;
+            },
+            'gai_strerror': function(emu, args) {
+                return self.storeString('Unknown error');
+            },
+            'inet_addr': function(emu, args) {
+                var str = args[0] ? self._readCString(emu, args[0]) : '';
+                var parts = str.split('.');
+                if (parts.length === 4) {
+                    return ((parseInt(parts[0]) & 0xFF)) |
+                           ((parseInt(parts[1]) & 0xFF) << 8) |
+                           ((parseInt(parts[2]) & 0xFF) << 16) |
+                           ((parseInt(parts[3]) & 0xFF) << 24);
+                }
+                return 0xFFFFFFFF;
+            },
+            'inet_pton': function(emu, args) {
+                var af = args[0], srcPtr = args[1], dstPtr = args[2];
+                if (af === 2 && srcPtr && dstPtr) { // AF_INET
+                    var str = self._readCString(emu, srcPtr);
+                    var parts = str.split('.');
+                    if (parts.length === 4) {
+                        emu.mem_write(dstPtr, [
+                            parseInt(parts[0]) & 0xFF, parseInt(parts[1]) & 0xFF,
+                            parseInt(parts[2]) & 0xFF, parseInt(parts[3]) & 0xFF
+                        ]);
+                        return 1; // success
+                    }
+                }
+                return 0;
+            },
+            'inet_ntop': function(emu, args) {
+                var af = args[0], srcPtr = args[1], dstPtr = args[2], size = args[3];
+                if (af === 2 && srcPtr && dstPtr) { // AF_INET
+                    try {
+                        var bytes = emu.mem_read(srcPtr, 4);
+                        var str = bytes[0] + '.' + bytes[1] + '.' + bytes[2] + '.' + bytes[3];
+                        var out = [];
+                        for (var i = 0; i < str.length; i++) out.push(str.charCodeAt(i));
+                        out.push(0);
+                        emu.mem_write(dstPtr, out);
+                        return dstPtr;
+                    } catch(e) {}
+                }
+                return 0;
+            },
             'htons': function(emu, args) { return ((args[0] & 0xFF) << 8) | ((args[0] >> 8) & 0xFF); },
             'htonl': function(emu, args) {
                 var v = args[0];
@@ -1897,6 +2242,121 @@ const AndroidShims = {
                 var v = args[0];
                 return ((v & 0xFF) << 24) | ((v & 0xFF00) << 8) | ((v >> 8) & 0xFF00) | ((v >> 24) & 0xFF);
             },
+            'getsockname': function(emu, args) {
+                // Fill in a dummy local address
+                var fd = args[0], addrPtr = args[1], lenPtr = args[2];
+                if (addrPtr) {
+                    try {
+                        emu.mem_write(addrPtr, [2, 0, 0, 0, 127, 0, 0, 1, 0,0,0,0,0,0,0,0]);
+                        if (lenPtr) emu.mem_write(lenPtr, [16, 0, 0, 0]);
+                    } catch(e) {}
+                }
+                return 0;
+            },
+            'getpeername': function(emu, args) {
+                var fd = args[0], addrPtr = args[1], lenPtr = args[2];
+                var sock = self._virtualSockets[fd];
+                if (addrPtr && sock) {
+                    try {
+                        var port = sock.port || 80;
+                        emu.mem_write(addrPtr, [2, 0, (port>>8)&0xFF, port&0xFF, 10, 0, 0, 1, 0,0,0,0,0,0,0,0]);
+                        if (lenPtr) emu.mem_write(lenPtr, [16, 0, 0, 0]);
+                    } catch(e) {}
+                }
+                return 0;
+            },
+            // ============================================
+            // v25: SSL shims — intercept OpenSSL calls
+            // Route SSL_write/SSL_read through virtual sockets
+            // ============================================
+            'SSL_library_init': function(emu, args) { return 1; },
+            'SSL_load_error_strings': function(emu, args) { return 0; },
+            'OPENSSL_add_all_algorithms_noconf': function(emu, args) { return 0; },
+            'SSLv23_client_method': function(emu, args) { return self.malloc(8); },
+            'TLS_client_method': function(emu, args) { return self.malloc(8); },
+            'TLSv1_2_client_method': function(emu, args) { return self.malloc(8); },
+            'SSL_CTX_new': function(emu, args) {
+                var ctx = self.malloc(64);
+                return ctx;
+            },
+            'SSL_CTX_free': function(emu, args) { return 0; },
+            'SSL_CTX_set_verify': function(emu, args) { return 0; },
+            'SSL_CTX_set_options': function(emu, args) { return 0; },
+            'SSL_CTX_ctrl': function(emu, args) { return 0; },
+            'SSL_CTX_set_cipher_list': function(emu, args) { return 1; },
+            'SSL_CTX_load_verify_locations': function(emu, args) { return 1; },
+            'SSL_CTX_set_default_verify_paths': function(emu, args) { return 1; },
+            'SSL_new': function(emu, args) {
+                // Allocate fake SSL struct, store the socket FD at offset 0
+                var ssl = self.malloc(64);
+                return ssl;
+            },
+            'SSL_free': function(emu, args) { return 0; },
+            'SSL_set_fd': function(emu, args) {
+                var ssl = args[0], fd = args[1];
+                if (ssl) {
+                    try { emu.mem_write(ssl, [fd & 0xFF, (fd >> 8) & 0xFF, (fd >> 16) & 0xFF, (fd >> 24) & 0xFF]); } catch(e) {}
+                }
+                return 1;
+            },
+            'SSL_connect': function(emu, args) { return 1; }, // success
+            'SSL_get_error': function(emu, args) { return 0; }, // SSL_ERROR_NONE
+            'SSL_write': function(emu, args) {
+                // Route through virtual socket send
+                var ssl = args[0], bufPtr = args[1], len = args[2];
+                var fd = 0;
+                if (ssl) {
+                    try {
+                        var fdBytes = emu.mem_read(ssl, 4);
+                        fd = (fdBytes[0] | (fdBytes[1] << 8) | (fdBytes[2] << 16) | (fdBytes[3] << 24)) >>> 0;
+                    } catch(e) {}
+                }
+                var sock = self._virtualSockets[fd];
+                if (sock) {
+                    try {
+                        var data = emu.mem_read(bufPtr, len);
+                        for (var i = 0; i < data.length; i++) sock.sendBuf.push(data[i]);
+                    } catch(e) { return -1; }
+                    self._tryProcessHttpRequest(sock);
+                    return len;
+                }
+                return len; // pretend success
+            },
+            'SSL_read': function(emu, args) {
+                // Route through virtual socket recv
+                var ssl = args[0], bufPtr = args[1], len = args[2];
+                var fd = 0;
+                if (ssl) {
+                    try {
+                        var fdBytes = emu.mem_read(ssl, 4);
+                        fd = (fdBytes[0] | (fdBytes[1] << 8) | (fdBytes[2] << 16) | (fdBytes[3] << 24)) >>> 0;
+                    } catch(e) {}
+                }
+                var sock = self._virtualSockets[fd];
+                if (sock) {
+                    if (!sock.recvBuf) self._tryProcessHttpRequest(sock);
+                    if (!sock.recvBuf) return 0;
+                    var available = sock.recvBuf.length - sock.recvOffset;
+                    if (available <= 0) return 0;
+                    var toRead = Math.min(len, available);
+                    try {
+                        var slice = sock.recvBuf.slice(sock.recvOffset, sock.recvOffset + toRead);
+                        emu.mem_write(bufPtr, Array.from(slice));
+                        sock.recvOffset += toRead;
+                    } catch(e) { return -1; }
+                    return toRead;
+                }
+                return 0;
+            },
+            'SSL_shutdown': function(emu, args) { return 1; },
+            'SSL_pending': function(emu, args) { return 0; },
+            'SSL_get_verify_result': function(emu, args) { return 0; }, // X509_V_OK
+            'ERR_error_string_n': function(emu, args) { return 0; },
+            'ERR_get_error': function(emu, args) { return 0; },
+            'ERR_clear_error': function(emu, args) { return 0; },
+            'X509_free': function(emu, args) { return 0; },
+            'SSL_get_peer_certificate': function(emu, args) { return 0; },
+
             'strerror': function(emu, args) {
                 var ptr = self.storeString('Unknown error');
                 return ptr;
@@ -2180,11 +2640,8 @@ const AndroidShims = {
             'regfree': function(emu, args) { return 0; },
             'regerror': function(emu, args) { return 0; },
 
-            // Network stubs
-            'inet_pton': function(emu, args) { return 0; },
-            'inet_ntop': function(emu, args) { return 0; },
+            // Network stubs (supplementary)
             'if_nametoindex': function(emu, args) { return 0; },
-            'getsockname': function(emu, args) { return -1; },
 
             // System info stubs
             'uname': function(emu, args) {

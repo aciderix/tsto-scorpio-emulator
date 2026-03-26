@@ -408,6 +408,7 @@ window._capturedLogs = [];
     <script src="js/logger.js"></script>
 <script src="js/elf-loader.js"></script>
 <script src="js/vfs.js"></script>
+<script src="js/game-server.js"></script>
 <script src="js/android-shims.js"></script>
 <script src="js/jni-bridge.js"></script>
 <script src="js/gl-bridge.js"></script>
@@ -686,6 +687,8 @@ window._generateReport = function() {
                     (s.heapFrees || 0) + ' frees, ' + (s.heapRecycled || 0) + ' recycled');
         lines.push('  Threads: ' + (s.threadsCreated || 0) + ' created, ' + (s.threadsExecuted || 0) + ' executed');
         lines.push('  DLsym stubs: ' + (s.dlsymStubs || 0));
+        lines.push('  Network: ' + (AndroidShims._netRequestCount || 0) + ' requests, ' + (AndroidShims._netResponseCount || 0) + ' responses');
+        lines.push('  Virtual sockets: ' + Object.keys(AndroidShims._virtualSockets || {}).length + ' open');
     } else {
         lines.push('  Engine not initialized');
     }
