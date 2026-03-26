@@ -72,7 +72,7 @@ class JNIBridge {
 
         // Logging
         this._jniCallCounts = new Map();
-        this._maxLogPerFunc = 20; // v3.0: increased for debugging
+        this._maxLogPerFunc = 50; // v27: increased to capture boolean/void method calls
         this.callLog = [];
         this._verboseInit = true; // v3.0: verbose during init
     }
@@ -224,12 +224,9 @@ class JNIBridge {
             36: { name: 'CallObjectMethodA', handler: function(emu, args) { return self._handleCallMethod('Object', emu, args); } },
 
             // CallBooleanMethod (37-39)
-            37: { name: 'CallBooleanMethod', handler: function(emu, args) {
-                self._logJNI('CallBooleanMethod', 'obj=0x' + (args[1]>>>0).toString(16) + ' method=0x' + (args[2]>>>0).toString(16));
-                return 0;
-            }},
-            38: { name: 'CallBooleanMethodV', handler: function(emu, args) { return 0; } },
-            39: { name: 'CallBooleanMethodA', handler: function(emu, args) { return 0; } },
+            37: { name: 'CallBooleanMethod', handler: function(emu, args) { return self._handleBooleanMethod(emu, args); } },
+            38: { name: 'CallBooleanMethodV', handler: function(emu, args) { return self._handleBooleanMethod(emu, args); } },
+            39: { name: 'CallBooleanMethodA', handler: function(emu, args) { return self._handleBooleanMethod(emu, args); } },
 
             // CallIntMethod (49-51) - v3.0: return sensible values
             49: { name: 'CallIntMethod', handler: function(emu, args) {
@@ -317,9 +314,9 @@ class JNIBridge {
             114: { name: 'CallStaticObjectMethod', handler: function(emu, args) { return self._handleCallMethod('StaticObject', emu, args); } },
             115: { name: 'CallStaticObjectMethodV', handler: function(emu, args) { return self._handleCallMethod('StaticObject', emu, args); } },
             116: { name: 'CallStaticObjectMethodA', handler: function(emu, args) { return self._handleCallMethod('StaticObject', emu, args); } },
-            117: { name: 'CallStaticBooleanMethod', handler: function(emu, args) { return 0; } },
-            118: { name: 'CallStaticBooleanMethodV', handler: function(emu, args) { return 0; } },
-            119: { name: 'CallStaticBooleanMethodA', handler: function(emu, args) { return 0; } },
+            117: { name: 'CallStaticBooleanMethod', handler: function(emu, args) { return self._handleBooleanMethod(emu, args); } },
+            118: { name: 'CallStaticBooleanMethodV', handler: function(emu, args) { return self._handleBooleanMethod(emu, args); } },
+            119: { name: 'CallStaticBooleanMethodA', handler: function(emu, args) { return self._handleBooleanMethod(emu, args); } },
             120: { name: 'CallStaticByteMethod', handler: function(emu, args) { return 0; } },
             121: { name: 'CallStaticByteMethodV', handler: function(emu, args) { return 0; } },
             122: { name: 'CallStaticByteMethodA', handler: function(emu, args) { return 0; } },
@@ -356,7 +353,13 @@ class JNIBridge {
                 self._logJNI('CallStaticVoidMethod', 'class=0x' + (args[1]>>>0).toString(16) + ' method=0x' + (args[2]>>>0).toString(16));
                 return 0;
             }},
-            142: { name: 'CallStaticVoidMethodV', handler: function(emu, args) { return 0; } },
+            142: { name: 'CallStaticVoidMethodV', handler: function(emu, args) {
+                var methodId = args[2];
+                var method = self._methodRegistry.get(methodId);
+                var name = method ? method.name : '?';
+                self._logJNI('CallStaticVoidMethodV', name + ' class=0x' + (args[1]>>>0).toString(16));
+                return 0;
+            } },
             143: { name: 'CallStaticVoidMethodA', handler: function(emu, args) { return 0; } },
 
             // ---- Static Fields ----
@@ -893,6 +896,38 @@ class JNIBridge {
                 Logger.warn('  [' + i + '] Failed to read native method');
             }
         }
+    }
+
+    _handleBooleanMethod(emu, args) {
+        var methodId = args[2];
+        var method = this._methodRegistry.get(methodId);
+        var name = method ? method.name : '?';
+        var nameLower = name.toLowerCase();
+
+        // Network connectivity — always return true (connected)
+        if (nameLower.indexOf('isconnected') >= 0 || nameLower.indexOf('isnetwork') >= 0 ||
+            nameLower.indexOf('isonline') >= 0 || nameLower.indexOf('isavailable') >= 0 ||
+            nameLower.indexOf('haswifi') >= 0 || nameLower.indexOf('iswifi') >= 0 ||
+            nameLower.indexOf('hasnetwork') >= 0 || nameLower.indexOf('isreachable') >= 0 ||
+            nameLower.indexOf('networkavailable') >= 0 || nameLower.indexOf('hasconnect') >= 0) {
+            this._logJNI('CallBooleanMethod', name + ' → 1 (network=connected)');
+            return 1;
+        }
+        // Airplane mode — return false (not in airplane mode)
+        if (nameLower.indexOf('airplane') >= 0 || nameLower.indexOf('flightmode') >= 0) {
+            this._logJNI('CallBooleanMethod', name + ' → 0 (not airplane)');
+            return 0;
+        }
+        // Download complete / ready checks — return true
+        if (nameLower.indexOf('iscomplete') >= 0 || nameLower.indexOf('isready') >= 0 ||
+            nameLower.indexOf('isfinished') >= 0 || nameLower.indexOf('isloaded') >= 0 ||
+            nameLower.indexOf('isdone') >= 0) {
+            this._logJNI('CallBooleanMethod', name + ' → 1 (ready)');
+            return 1;
+        }
+        // Default: return 1 (true) — most boolean checks are "is X available/enabled"
+        this._logJNI('CallBooleanMethod', name + ' → 1 (default true)');
+        return 1;
     }
 
     _handleCallMethod(type, emu, args) {
