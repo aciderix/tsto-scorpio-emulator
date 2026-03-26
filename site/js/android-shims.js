@@ -1051,19 +1051,24 @@ const AndroidShims = {
                 var path = self._readCString(emu, args[0]);
                 var mode = self._readCString(emu, args[1]);
 
-                // Debug: log the address and result for tracing string bridge issues
                 if (!path) {
                     Logger.warn('[fopen] EMPTY path from addr 0x' + (args[0]>>>0).toString(16) + ' mode=' + mode);
                 }
 
+                // v27e: Log ALL fopen attempts
+                Logger.info('[fopen] ATTEMPT: "' + path + '" mode=' + mode);
+
                 // Try VFS first
                 if (self.vfs) {
                     var fd = self.vfs.fopen(path, mode);
-                    if (fd) return fd; // VFS has this file
+                    if (fd) {
+                        Logger.info('[fopen] HIT: ' + path + ' → fd=' + fd);
+                        return fd;
+                    }
                 }
 
                 // Not in VFS — log and return NULL
-                Logger.info('[fopen] MISS: ' + path + ' mode=' + mode);
+                Logger.warn('[fopen] MISS: ' + path + ' mode=' + mode);
                 return 0;
             },
             'fclose':  function(emu, args) {
@@ -1078,9 +1083,17 @@ const AndroidShims = {
                 var itemSize = args[1];
                 var itemCount = args[2];
                 var fd = args[3];
-                
+
                 if (self.vfs && fd >= 100) {
-                    return self.vfs.fread(fd, destPtr, itemSize, itemCount, emu);
+                    var result = self.vfs.fread(fd, destPtr, itemSize, itemCount, emu);
+                    // v27e: Log file reads for debugging BGrm text pool loading
+                    if (self._freadLogCount === undefined) self._freadLogCount = 0;
+                    if (self._freadLogCount < 50) {
+                        self._freadLogCount++;
+                        var totalBytes = itemSize * result;
+                        Logger.info('[fread] fd=' + fd + ' size=' + itemSize + ' count=' + itemCount + ' → ' + result + ' items (' + totalBytes + ' bytes)');
+                    }
+                    return result;
                 }
                 return 0;
             },
