@@ -57,7 +57,7 @@ const AndroidShims = {
         this._threadsDone = new Set();
         this._condSignaled = new Set();
         this._dlsymStubs = new Map();
-        Logger.info('Android shims v25 initialized (free-list heap + thread exec + dlsym stubs + virtual sockets)');
+        Logger.info('Android shims v26 initialized (+ ctype/libc/C++ stdlib + enhanced STUB diagnostics)');
     },
 
     // ============================================
@@ -716,8 +716,27 @@ const AndroidShims = {
                 } catch(e) {}
                 return dst;
             },
+            '__aeabi_memmove8': function(emu, args) {
+                var dst = args[0], src = args[1], n = args[2];
+                if (!n || !dst || !src || n > 4194304) return dst;
+                try {
+                    var data = emu.mem_read(src, n);
+                    emu.mem_write(dst, Array.from(data));
+                } catch(e) {}
+                return dst;
+            },
             // __aeabi_memset(dst, SIZE, VALUE) — note: reversed from standard memset!
             '__aeabi_memset': function(emu, args) {
+                var dst = args[0], n = args[1], val = args[2] & 0xFF;
+                if (!n || !dst || n > 4194304) return dst;
+                try {
+                    var data = new Array(n);
+                    for (var i = 0; i < n; i++) data[i] = val;
+                    emu.mem_write(dst, data);
+                } catch(e) {}
+                return dst;
+            },
+            '__aeabi_memset4': function(emu, args) {
                 var dst = args[0], n = args[1], val = args[2] & 0xFF;
                 if (!n || !dst || n > 4194304) return dst;
                 try {
@@ -1465,7 +1484,11 @@ const AndroidShims = {
             '__android_log_vprint': function(emu, args) {
                 var tag = self._readCString(emu, args[1]);
                 var fmt = self._readCString(emu, args[2]);
-                Logger.info('[Android:' + tag + '] ' + fmt);
+                var vaPtr = args[3];
+                var msg = self._formatString(emu, fmt, function(idx) {
+                    return self._readU32(emu, vaPtr + idx * 4);
+                });
+                Logger.info('[Android:' + tag + '] ' + msg);
                 return 0;
             },
             '__android_log_write': function(emu, args) {
@@ -1475,9 +1498,15 @@ const AndroidShims = {
                 return 0;
             },
             '__android_log_print': function(emu, args) {
+                // __android_log_print(prio, tag, fmt, ...) — variadic
+                // R0=prio, R1=tag, R2=fmt, R3=first_vararg, stack for rest
                 var tag = self._readCString(emu, args[1]);
                 var fmt = self._readCString(emu, args[2]);
-                Logger.info('[Android:' + tag + '] ' + fmt);
+                var regArgs = [args[3]]; // R3 = first vararg
+                var stackArgs = self._readStackArgs(emu, 8);
+                var allArgs = regArgs.concat(stackArgs);
+                var msg = self._formatString(emu, fmt, function(idx) { return allArgs[idx] || 0; });
+                Logger.info('[Android:' + tag + '] ' + msg);
                 return 0;
             },
             'AndroidBitmap_getInfo':     function(emu, args) { return 0; },
@@ -1982,6 +2011,199 @@ const AndroidShims = {
             'opendir': function(emu, args) { return 0; },
             'readdir': function(emu, args) { return 0; },
             'closedir': function(emu, args) { return 0; },
+            // ============================================
+            // v26: Missing critical libc/ctype/C++ functions
+            // ============================================
+            'tolower': function(emu, args) {
+                var c = args[0] & 0xFF;
+                if (c >= 0x41 && c <= 0x5A) return c + 0x20; // A-Z → a-z
+                return c;
+            },
+            'toupper': function(emu, args) {
+                var c = args[0] & 0xFF;
+                if (c >= 0x61 && c <= 0x7A) return c - 0x20; // a-z → A-Z
+                return c;
+            },
+            'isprint': function(emu, args) {
+                var c = args[0] & 0xFF;
+                return (c >= 0x20 && c <= 0x7E) ? 1 : 0;
+            },
+            'isspace': function(emu, args) {
+                var c = args[0] & 0xFF;
+                return (c === 0x20 || c === 0x09 || c === 0x0A || c === 0x0B || c === 0x0C || c === 0x0D) ? 1 : 0;
+            },
+            'isdigit': function(emu, args) {
+                var c = args[0] & 0xFF;
+                return (c >= 0x30 && c <= 0x39) ? 1 : 0;
+            },
+            'isalpha': function(emu, args) {
+                var c = args[0] & 0xFF;
+                return ((c >= 0x41 && c <= 0x5A) || (c >= 0x61 && c <= 0x7A)) ? 1 : 0;
+            },
+            'isalnum': function(emu, args) {
+                var c = args[0] & 0xFF;
+                return ((c >= 0x30 && c <= 0x39) || (c >= 0x41 && c <= 0x5A) || (c >= 0x61 && c <= 0x7A)) ? 1 : 0;
+            },
+            'strspn': function(emu, args) {
+                var str = self._readCString(emu, args[0]);
+                var accept = self._readCString(emu, args[1]);
+                var i = 0;
+                while (i < str.length && accept.indexOf(str[i]) >= 0) i++;
+                return i;
+            },
+            'strcspn': function(emu, args) {
+                var str = self._readCString(emu, args[0]);
+                var reject = self._readCString(emu, args[1]);
+                var i = 0;
+                while (i < str.length && reject.indexOf(str[i]) < 0) i++;
+                return i;
+            },
+            'basename': function(emu, args) {
+                var path = self._readCString(emu, args[0]);
+                var idx = path.lastIndexOf('/');
+                if (idx >= 0) return args[0] + idx + 1;
+                return args[0];
+            },
+            'clearerr': function(emu, args) { return 0; },
+            'rewind': function(emu, args) { return 0; },
+            'fdopen': function(emu, args) { return 0; },
+            'chmod': function(emu, args) { return 0; },
+            'bsd_signal': function(emu, args) { return 0; },
+            'gethostname': function(emu, args) {
+                var name = 'localhost';
+                if (args[0] && args[1] > 0) {
+                    try {
+                        var bytes = [];
+                        for (var i = 0; i < name.length; i++) bytes.push(name.charCodeAt(i));
+                        bytes.push(0);
+                        emu.mem_write(args[0], bytes);
+                    } catch(e) {}
+                }
+                return 0;
+            },
+            'gethostbyname': function(emu, args) {
+                // Return NULL — getaddrinfo is the preferred path
+                return 0;
+            },
+            'getnameinfo': function(emu, args) { return -1; },
+            'recvfrom': function(emu, args) {
+                var fd = args[0], bufPtr = args[1], len = args[2];
+                var sock = self._virtualSockets[fd];
+                if (!sock || !sock.recvBuf) return -1;
+                var available = sock.recvBuf.length - sock.recvOffset;
+                if (available <= 0) return 0;
+                var toRead = Math.min(len, available);
+                try {
+                    emu.mem_write(bufPtr, Array.from(sock.recvBuf.slice(sock.recvOffset, sock.recvOffset + toRead)));
+                    sock.recvOffset += toRead;
+                } catch(e) { return -1; }
+                return toRead;
+            },
+            'sendto': function(emu, args) {
+                var fd = args[0], bufPtr = args[1], len = args[2];
+                var sock = self._virtualSockets[fd];
+                if (!sock) return -1;
+                try {
+                    var data = emu.mem_read(bufPtr, len);
+                    for (var i = 0; i < data.length; i++) sock.sendBuf.push(data[i]);
+                } catch(e) { return -1; }
+                self._tryProcessHttpRequest(sock);
+                return len;
+            },
+            'socketpair': function(emu, args) { return -1; },
+            'waitpid': function(emu, args) { return -1; },
+            'kill': function(emu, args) { return 0; },
+            'fork': function(emu, args) { return -1; },
+            'execl': function(emu, args) { return -1; },
+            'mlock': function(emu, args) { return 0; },
+            'madvise': function(emu, args) { return 0; },
+            'getuid': function(emu, args) { return 10000; },
+            'getgid': function(emu, args) { return 10000; },
+            'getegid': function(emu, args) { return 10000; },
+            'geteuid': function(emu, args) { return 10000; },
+            'pthread_equal': function(emu, args) { return (args[0] === args[1]) ? 1 : 0; },
+            '__assert2': function(emu, args) {
+                var file = self._readCString(emu, args[0]);
+                var line = args[1];
+                var func = self._readCString(emu, args[2]);
+                var expr = self._readCString(emu, args[3]);
+                Logger.warn('[ASSERT] ' + file + ':' + line + ' ' + func + '(): ' + expr);
+                return 0;
+            },
+            'dl_unwind_find_exidx': function(emu, args) {
+                // ARM exception table lookup — return 0 (not found) with count 0
+                if (args[1]) {
+                    try { emu.mem_write(args[1], [0, 0, 0, 0]); } catch(e) {}
+                }
+                return 0;
+            },
+            '__cxa_rethrow': function(emu, args) {
+                Logger.warn('[C++ rethrow — suppressed]');
+                return 0;
+            },
+
+            // ============================================
+            // v26: C++ standard library (libc++/ndk)
+            // ============================================
+            // std::random_device
+            '_ZNSt6__ndk113random_deviceC1ERKNS_12basic_stringIcNS_11char_traitsIcEENS_9allocatorIcEEEE': function(emu, args) { return 0; },
+            '_ZNSt6__ndk113random_deviceclEv': function(emu, args) {
+                return (Math.random() * 0xFFFFFFFF) >>> 0;
+            },
+            '_ZNSt6__ndk113random_deviceD1Ev': function(emu, args) { return 0; },
+            // std::to_string variants
+            '_ZNSt6__ndk19to_stringEi': function(emu, args) {
+                var val = args[0] | 0; // signed
+                var str = val.toString();
+                var ptr = self.malloc(str.length + 1);
+                self._writeStringToMem(emu, ptr, str);
+                // libc++ small string layout: ptr at this+0, size at this+4, capacity at this+8
+                // But actually the return is via hidden pointer in R0
+                return ptr;
+            },
+            '_ZNSt6__ndk19to_stringEj': function(emu, args) {
+                var val = args[0] >>> 0;
+                var str = val.toString();
+                var ptr = self.malloc(str.length + 1);
+                self._writeStringToMem(emu, ptr, str);
+                return ptr;
+            },
+            '_ZNSt6__ndk19to_stringEx': function(emu, args) {
+                // long long — use R0 as low 32 bits
+                var val = args[0] | 0;
+                var str = val.toString();
+                var ptr = self.malloc(str.length + 1);
+                self._writeStringToMem(emu, ptr, str);
+                return ptr;
+            },
+            // std::mutex
+            '_ZNSt6__ndk15mutexD1Ev': function(emu, args) { return 0; },
+            // std::condition_variable
+            '_ZNSt6__ndk118condition_variableD1Ev': function(emu, args) { return 0; },
+            '_ZNSt6__ndk118condition_variable10notify_allEv': function(emu, args) { return 0; },
+            '_ZNSt6__ndk118condition_variable10notify_oneEv': function(emu, args) { return 0; },
+            '_ZNSt6__ndk118condition_variable4waitERNS_11unique_lockINS_5mutexEEE': function(emu, args) { return 0; },
+            // std::locale
+            '_ZNSt6__ndk16localeC1Ev': function(emu, args) { return 0; },
+            '_ZNKSt6__ndk16locale4nameEv': function(emu, args) {
+                var str = 'C';
+                var ptr = self.malloc(str.length + 1);
+                self._writeStringToMem(emu, ptr, str);
+                return ptr;
+            },
+            // std::shared_weak_count
+            '_ZNSt6__ndk119__shared_weak_count4lockEv': function(emu, args) { return args[0]; },
+            // std::logic_error
+            '_ZNSt11logic_errorC2EPKc': function(emu, args) { return 0; },
+            // std::regex_error
+            '_ZNSt6__ndk111regex_errorC1ENS_15regex_constants10error_typeE': function(emu, args) { return 0; },
+            // std::ios_base
+            '_ZNSt6__ndk18ios_baseD2Ev': function(emu, args) { return 0; },
+            '_ZNSt6__ndk18ios_base33__set_badbit_and_consider_rethrowEv': function(emu, args) { return 0; },
+            // collation/classname helpers
+            '_ZNSt6__ndk120__get_collation_nameEPKc': function(emu, args) { return args[0]; },
+            '_ZNSt6__ndk115__get_classnameEPKcb': function(emu, args) { return args[0]; },
+
             // ============================================
             // v25: VIRTUAL SOCKET LAYER — HTTP networking
             // ============================================

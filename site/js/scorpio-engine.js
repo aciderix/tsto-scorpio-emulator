@@ -386,6 +386,9 @@ class ScorpioEngine {
                 this._writeU32ToEmu(gotAddr, this.GENERIC_RETURN);
                 genericReturn++;
                 unresolvedList.push(rel.symName);
+                // v26: Track which GOT entries are unresolved for STUB diagnostics
+                if (!this._unresolvedGOT) this._unresolvedGOT = {};
+                this._unresolvedGOT[gotAddr] = rel.symName;
             }
         }
 
@@ -510,13 +513,56 @@ class ScorpioEngine {
                     var lr = self._readReg(uc.ARM_REG_LR);
                     var count = self._genericReturnCalls.get(lr) || 0;
                     self._genericReturnCalls.set(lr, count + 1);
-                    // v17: Log first 10 generic return calls with context during init
-                    if (count < 3) {
+                    // v26: Enhanced STUB logging — try to identify the unresolved function
+                    if (count < 5) {
                         var r0 = self._readReg(uc.ARM_REG_R0);
                         var r1 = self._readReg(uc.ARM_REG_R1);
                         var offset = ((lr - self.BASE) >>> 0);
+                        var symName = '(unknown)';
+                        // Try to find the function name: read the BL target at LR-4
+                        // On ARM, BL instruction encodes offset. But easier: check PLT veneer.
+                        // The call chain is: caller BL → PLT veneer → LDR PC,[GOT] → GENERIC_RETURN
+                        // We can scan nearby GOT entries for clues
+                        try {
+                            // Read 8 bytes before LR to look for the BL instruction
+                            var callerBytes = self.emu.mem_read(lr - 8, 8);
+                            var inst1 = (callerBytes[0] | (callerBytes[1]<<8) | (callerBytes[2]<<16) | (callerBytes[3]<<24)) >>> 0;
+                            var inst2 = (callerBytes[4] | (callerBytes[5]<<8) | (callerBytes[6]<<16) | (callerBytes[7]<<24)) >>> 0;
+                            // If Thumb mode (LR bit 0 set), decode BL differently
+                            var isThumb = (lr & 1) !== 0;
+                            if (isThumb) {
+                                // Thumb BL: 2-part encoding, target = PC + offset
+                                // Just log the raw bytes for now
+                                symName = '(thumb@LR-8: ' + inst1.toString(16) + ' ' + inst2.toString(16) + ')';
+                            } else {
+                                // ARM BL: top 4 bits = cond, next 4 = 0xB (BL), bottom 24 = signed offset
+                                if ((inst2 & 0x0F000000) === 0x0B000000) {
+                                    var blOffset = inst2 & 0x00FFFFFF;
+                                    if (blOffset & 0x800000) blOffset = blOffset | 0xFF000000; // sign extend
+                                    var target = ((lr - 4) + (blOffset << 2) + 8) >>> 0;
+                                    // Target should be a PLT veneer — read it to get GOT addr
+                                    try {
+                                        var pltBytes = self.emu.mem_read(target, 12);
+                                        // Look for LDR PC, [PC, #offset] pattern
+                                        var gotAddr2 = 0;
+                                        var pltInst = (pltBytes[0] | (pltBytes[1]<<8) | (pltBytes[2]<<16) | (pltBytes[3]<<24)) >>> 0;
+                                        if ((pltInst & 0xFFFFF000) === 0xE59FF000) {
+                                            // LDR PC, [PC, #imm12]
+                                            var pltOff = pltInst & 0xFFF;
+                                            gotAddr2 = (target + 8 + pltOff) >>> 0;
+                                        }
+                                        if (gotAddr2 && self._unresolvedGOT && self._unresolvedGOT[gotAddr2]) {
+                                            symName = self._unresolvedGOT[gotAddr2];
+                                        } else if (gotAddr2) {
+                                            symName = '(GOT@0x' + gotAddr2.toString(16) + ')';
+                                        }
+                                    } catch(ee) {}
+                                }
+                            }
+                        } catch(e2) {}
                         Logger.warn('[STUB] Generic return from LR=0x' + (lr>>>0).toString(16) +
-                            ' (offset 0x' + offset.toString(16) + ') R0=0x' + (r0>>>0).toString(16) +
+                            ' (offset 0x' + offset.toString(16) + ') fn=' + symName +
+                            ' R0=0x' + (r0>>>0).toString(16) +
                             ' R1=0x' + (r1>>>0).toString(16));
                     }
                     // v16: Re-write stub in case it was corrupted
