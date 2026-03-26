@@ -66,8 +66,23 @@ const AndroidShims = {
         this._nextDirHandle = 0xA0000000;
         this._direntBuf = 0;
         this._filePtrToFd = new Map();
+        this._filePtrBufs = new Map();
         this._freadLogCount = 0;
-        Logger.info('Android shims v28 initialized (+ opendir/readdir + FILE* struct + stat64)');
+        // v29: Register missing VFS files the game expects to find
+        if (this.vfs) {
+            // synergy_uid_override — auth UID for private server (empty = auto-generate)
+            this.vfs.addFile('/synergy_uid_override', '');
+            this.vfs.addFile('synergy_uid_override', '');
+            // Telemetry/log files — game opens these; provide empty stubs
+            this.vfs.addFile('/SendingFunnelLog', '');
+            this.vfs.addFile('/LoadingFunnelLog', '');
+            this.vfs.addFile('/prefbackup', '');
+            this.vfs.addFile('SendingFunnelLog', '');
+            this.vfs.addFile('LoadingFunnelLog', '');
+            this.vfs.addFile('prefbackup', '');
+            Logger.info('[VFS] v29: Registered synergy_uid_override + telemetry stubs');
+        }
+        Logger.info('Android shims v29 initialized (+ memory fixes + VFS stubs)');
     },
 
     // ============================================

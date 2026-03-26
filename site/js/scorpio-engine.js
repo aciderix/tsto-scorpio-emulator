@@ -20,7 +20,7 @@ class ScorpioEngine {
         this.STACK = 0xF0000000;
         this.STACK_SIZE = 2 * 1024 * 1024;
         this.HEAP = 0xD0000000;
-        this.HEAP_SIZE = 32 * 1024 * 1024; // v15.3: increased from 4MB for game asset loading
+        this.HEAP_SIZE = 64 * 1024 * 1024; // v29: match AndroidShims._heapSize (64MB) — fixes QEMU section overflow from auto-mapping 0xD2000000+ pages
         this.SHIM_BASE = 0xE0000000;
         this.SHIM_SIZE = 0x100000;
         this.RETURN_SENTINEL = this.SHIM_BASE + this.SHIM_SIZE - 0x1000; // Dedicated stop address for emu_start
@@ -694,10 +694,12 @@ class ScorpioEngine {
                         ' R0=0x' + (r0>>>0).toString(16));
                 }
                 // Map the page so Unicorn doesn't fault, write a BX LR there
-                var aligned = addr & ~0xFFF;
+                // v29: Use 1MB blocks to reduce section table fragmentation
+                var CODE_BLOCK = 0x100000;
+                var aligned = addr & ~(CODE_BLOCK - 1);
                 if (!this._autoMapped.has(aligned)) {
                     try {
-                        this.emu.mem_map(aligned, 0x1000, uc.PROT_ALL);
+                        this.emu.mem_map(aligned, CODE_BLOCK, uc.PROT_ALL);
                         this._autoMapped.add(aligned);
                     } catch(e) {}
                 }
@@ -717,12 +719,16 @@ class ScorpioEngine {
             return false;
         }
 
-        var aligned = addr & ~0x3FFF;
+        // v29: Use 1MB blocks instead of 16KB to reduce QEMU section table fragmentation.
+        // The QEMU assertion (map->sections_nb < TARGET_PAGE_SIZE) fires when too many
+        // small mem_map calls exhaust the section table.
+        var AUTO_BLOCK = 0x100000; // 1MB
+        var aligned = addr & ~(AUTO_BLOCK - 1);
         if (!this._autoMapped.has(aligned)) {
             try {
-                this.emu.mem_map(aligned, 0x4000, uc.PROT_ALL);
+                this.emu.mem_map(aligned, AUTO_BLOCK, uc.PROT_ALL);
                 this._autoMapped.add(aligned);
-                this.memMapped += 0x4000;
+                this.memMapped += AUTO_BLOCK;
 
                 if (this._unmappedAccessLog.length < this._maxUnmappedLog) {
                     var pc = this._readReg(uc.ARM_REG_PC);

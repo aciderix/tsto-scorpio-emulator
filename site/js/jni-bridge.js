@@ -93,23 +93,18 @@ class JNIBridge {
 
         // Fill vtable with unique addresses per slot (for debugging unhandled JNI calls)
         // Each slot gets RETURN_STUB + slot*4 — all map to the same page with BX LR
-        this.JNI_STUB_BASE = 0xE0080000; // dedicated JNI stub page
-        try {
-            emu.mem_map(this.JNI_STUB_BASE, 0x1000, uc.PROT_ALL);
-            // Write MOV R0, #0; BX LR at each 8-byte aligned slot
-            for (var i = 0; i < 256; i++) {
-                var stubAddr = this.JNI_STUB_BASE + i * 8;
-                emu.mem_write(stubAddr, [
-                    0x00, 0x00, 0xA0, 0xE3,  // MOV R0, #0
-                    0x1E, 0xFF, 0x2F, 0xE1,  // BX LR
-                ]);
-                this._writeU32(this.JNIENV_VTABLE + i * 4, stubAddr);
-            }
-        } catch(e) {
-            // Fallback: use generic return stub
-            for (var i = 0; i < 256; i++) {
-                this._writeU32(this.JNIENV_VTABLE + i * 4, this.RETURN_STUB);
-            }
+        // v29: JNI_STUB_BASE is inside SHIM region (0xE0000000-0xE00FFFFF), already mapped.
+        // Previous code tried mem_map here → error 11 (overlap) → fell back to RETURN_STUB.
+        // Now we just write directly — no extra mem_map needed.
+        this.JNI_STUB_BASE = 0xE0080000;
+        // Write MOV R0, #0; BX LR at each 8-byte aligned slot
+        for (var i = 0; i < 256; i++) {
+            var stubAddr = this.JNI_STUB_BASE + i * 8;
+            emu.mem_write(stubAddr, [
+                0x00, 0x00, 0xA0, 0xE3,  // MOV R0, #0
+                0x1E, 0xFF, 0x2F, 0xE1,  // BX LR
+            ]);
+            this._writeU32(this.JNIENV_VTABLE + i * 4, stubAddr);
         }
 
         // JavaVM* → vtable
