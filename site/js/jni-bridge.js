@@ -330,7 +330,26 @@ class JNIBridge {
             130: { name: 'CallStaticIntMethodV', handler: function(emu, args) { return 0; } },
             131: { name: 'CallStaticIntMethodA', handler: function(emu, args) { return 0; } },
             126: { name: 'CallStaticShortMethod', handler: function(emu, args) { return 0; } },
-            132: { name: 'CallStaticLongMethod', handler: function(emu, args) { return 0; } },
+            132: { name: 'CallStaticLongMethod', handler: function(emu, args) {
+                var method = self._methodRegistry.get(args[2]);
+                var name = method ? method.name : '?';
+                self._logJNI('CallStaticLongMethod', name + ' class=0x' + (args[1]>>>0).toString(16));
+                // Return large value (e.g. available storage space in bytes)
+                // Long on ARM: low 32 bits in R0, high 32 bits in R1
+                try { emu.reg_write(1, [0, 0, 0, 0]); } catch(e) {} // R1 = 0 (high)
+                return 0x40000000; // ~1GB (low 32 bits)
+            }},
+            133: { name: 'CallStaticLongMethodV', handler: function(emu, args) {
+                var method = self._methodRegistry.get(args[2]);
+                var name = method ? method.name : '?';
+                self._logJNI('CallStaticLongMethodV', name + ' class=0x' + (args[1]>>>0).toString(16));
+                try { emu.reg_write(1, [0, 0, 0, 0]); } catch(e) {} // R1 = 0 (high)
+                return 0x40000000; // ~1GB
+            }},
+            134: { name: 'CallStaticLongMethodA', handler: function(emu, args) {
+                try { emu.reg_write(1, [0, 0, 0, 0]); } catch(e) {}
+                return 0x40000000;
+            }},
             135: { name: 'CallStaticFloatMethod', handler: function(emu, args) { return 0; } },
             138: { name: 'CallStaticDoubleMethod', handler: function(emu, args) { return 0; } },
             141: { name: 'CallStaticVoidMethod', handler: function(emu, args) {
