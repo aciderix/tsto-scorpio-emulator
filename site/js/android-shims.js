@@ -2205,6 +2205,108 @@ const AndroidShims = {
             '_ZNSt6__ndk115__get_classnameEPKcb': function(emu, args) { return args[0]; },
 
             // ============================================
+            // v26b: Remaining critical unresolved functions
+            // ============================================
+            // EA::Nimble::getEnv() — returns JNIEnv* pointer (critical for Nimble!)
+            '_ZN2EA6Nimble6getEnvEv': function(emu, args) {
+                Logger.info('[Nimble] getEnv() → returning JNIEnv=0xD0000000');
+                return 0xD0000000; // JNIEnv base address
+            },
+            // std::thread
+            '_ZNSt6__ndk16threadD1Ev': function(emu, args) { return 0; }, // ~thread()
+            '_ZNSt6__ndk115__thread_structC1Ev': function(emu, args) { return 0; }, // __thread_struct()
+            '_ZNSt6__ndk115__thread_structD1Ev': function(emu, args) { return 0; }, // ~__thread_struct()
+            '_ZNSt6__ndk16thread6detachEv': function(emu, args) { return 0; }, // thread::detach()
+            '_ZNSt6__ndk16thread20hardware_concurrencyEv': function(emu, args) { return 4; }, // thread::hardware_concurrency()
+            // std::this_thread::sleep_for
+            '_ZNSt6__ndk111this_thread9sleep_forERKNS_6chrono8durationIxNS_5ratioILx1ELx1000000000EEEEE': function(emu, args) { return 0; },
+            // std::to_string(unsigned long long)
+            '_ZNSt6__ndk19to_stringEy': function(emu, args) {
+                var val = args[0] >>> 0;
+                var str = val.toString();
+                var ptr = self.malloc(str.length + 1);
+                self._writeStringToMem(emu, ptr, str);
+                return ptr;
+            },
+            // std::__throw_system_error
+            '_ZNSt6__ndk120__throw_system_errorEiPKc': function(emu, args) {
+                var msg = self._readCString(emu, args[1]);
+                Logger.warn('[C++ system_error: ' + args[0] + ' ' + msg + ']');
+                return 0;
+            },
+            // time_get::get (locale-aware time parsing — stub)
+            '_ZNKSt6__ndk18time_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEE3getES4_S4_RNS_8ios_baseERjP2tmPKcSC_': function(emu, args) { return 0; },
+            // std::__throw_bad_function_call
+            '_ZSt18__throw_bad_function_callv': function(emu, args) {
+                Logger.warn('[C++ bad_function_call]');
+                return 0;
+            },
+            // EA::Nimble::findClass(const char*) — CRITICAL: Returns JNI class ref
+            '_ZN2EA6Nimble9findClassEPKc': function(emu, args) {
+                var className = self._readCString(emu, args[0]);
+                // Use the JNI bridge to find/create the class
+                var classId = 0;
+                if (self.engine && self.engine.jni) {
+                    classId = self.engine.jni._getOrCreateClass(className.replace(/\./g, '/'));
+                }
+                Logger.info('[Nimble] findClass("' + className + '") → 0x' + (classId>>>0).toString(16));
+                return classId;
+            },
+            // std::uncaught_exception()
+            '_ZSt18uncaught_exceptionv': function(emu, args) { return 0; },
+            // std::__thread_local_data() — returns a thread-local storage pointer
+            '_ZNSt6__ndk119__thread_local_dataEv': function(emu, args) {
+                if (!self._threadLocalData) {
+                    self._threadLocalData = self.malloc(256); // allocate TLS block
+                    // Zero it
+                    try {
+                        var zeros = new Array(256);
+                        for (var i = 0; i < 256; i++) zeros[i] = 0;
+                        self.engine.emu.mem_write(self._threadLocalData, zeros);
+                    } catch(e) {}
+                }
+                return self._threadLocalData;
+            },
+            // std::chrono::steady_clock::now()
+            '_ZNSt6__ndk16chrono12steady_clock3nowEv': function(emu, args) {
+                // Returns time_point as nanoseconds since epoch
+                // On ARM, 64-bit return in R0 (low) and R1 (high)
+                var nowNs = Date.now() * 1000000; // ms → ns
+                var low = nowNs & 0xFFFFFFFF;
+                var high = Math.floor(nowNs / 0x100000000) & 0xFFFFFFFF;
+                // Write R1 for the high part
+                try {
+                    self.engine.emu.reg_write(1, [
+                        (high) & 0xFF, (high >> 8) & 0xFF,
+                        (high >> 16) & 0xFF, (high >> 24) & 0xFF
+                    ]);
+                } catch(e) {}
+                return low; // R0 = low part
+            },
+            // std::condition_variable::__do_timed_wait
+            '_ZNSt6__ndk118condition_variable15__do_timed_waitERNS_11unique_lockINS_5mutexEEENS_6chrono10time_pointINS5_12system_clockENS5_8durationIxNS_5ratioILx1ELx1000000000EEEEEEE': function(emu, args) {
+                return 0; // Return 0 (no timeout)
+            },
+            // operator new(size_t, nothrow_t) — non-throwing new
+            '_ZnwjRKSt9nothrow_t': function(emu, args) {
+                var size = args[0] || 16;
+                return self.malloc(size);
+            },
+            // libc
+            'modf': function(emu, args) {
+                // modf(double, double*) — split into integer and fractional parts
+                // ARM: double in R0:R1, ptr in R2
+                // Just return 0.0 (fractional part) and store 0.0 at ptr
+                if (args[2]) {
+                    try { self.engine.emu.mem_write(args[2], [0,0,0,0,0,0,0,0]); } catch(e) {}
+                }
+                return 0;
+            },
+            'fsync': function(emu, args) { return 0; },
+            'fchown': function(emu, args) { return 0; },
+            'utimes': function(emu, args) { return 0; },
+
+            // ============================================
             // v25: VIRTUAL SOCKET LAYER — HTTP networking
             // ============================================
             'socket': function(emu, args) {
