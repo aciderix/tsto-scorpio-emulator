@@ -1129,7 +1129,15 @@ const AndroidShims = {
                                     // Copy file data into emulator memory
                                     var chunk = Array.from(handle.data);
                                     emu.mem_write(bufPtr, chunk);
-                                    Logger.info('[fopen] Loaded ' + fileSize + ' bytes into buffer at 0x' + bufPtr.toString(16));
+                                    // v28c: Verify buffer was written correctly
+                                    var verifyLen = Math.min(32, fileSize);
+                                    var verify = emu.mem_read(bufPtr, verifyLen);
+                                    var match = true;
+                                    for (var vi = 0; vi < verifyLen; vi++) {
+                                        if (verify[vi] !== handle.data[vi]) { match = false; break; }
+                                    }
+                                    var hexPreview = Array.from(verify).slice(0, 16).map(function(b) { return b.toString(16).padStart(2, '0'); }).join(' ');
+                                    Logger.info('[fopen] Loaded ' + fileSize + ' bytes into buffer at 0x' + bufPtr.toString(16) + ' verify=' + (match ? 'OK' : 'MISMATCH') + ' [' + hexPreview + ']');
                                 } catch(e) {
                                     Logger.warn('[fopen] Failed to load file buffer: ' + e.message);
                                     self.free(bufPtr);
@@ -1170,6 +1178,13 @@ const AndroidShims = {
                                 fs[22] = (fileSize >> 16) & 0xFF; fs[23] = (fileSize >> 24) & 0xFF;
 
                                 emu.mem_write(filePtr, fs);
+                                // v28c: Verify FILE struct was written correctly
+                                var fsVerify = emu.mem_read(filePtr, 24);
+                                var vp = (fsVerify[0] | (fsVerify[1] << 8) | (fsVerify[2] << 16) | (fsVerify[3] << 24)) >>> 0;
+                                var vr = (fsVerify[4] | (fsVerify[5] << 8) | (fsVerify[6] << 16) | (fsVerify[7] << 24)) >>> 0;
+                                var vbase = (fsVerify[16] | (fsVerify[17] << 8) | (fsVerify[18] << 16) | (fsVerify[19] << 24)) >>> 0;
+                                var vsize = (fsVerify[20] | (fsVerify[21] << 8) | (fsVerify[22] << 16) | (fsVerify[23] << 24)) >>> 0;
+                                Logger.info('[fopen] FILE struct verify: _p=0x' + vp.toString(16) + ' _r=' + vr + ' _bf.base=0x' + vbase.toString(16) + ' _bf.size=' + vsize);
                             } catch(e) {
                                 Logger.warn('[fopen] Failed to write FILE struct: ' + e.message);
                             }

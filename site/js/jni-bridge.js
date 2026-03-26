@@ -68,7 +68,7 @@ class JNIBridge {
             'CustomConfigBasicAuth': '',
             'ServerErrorReason': '',
             'DLCSecretKey': 'tapped_out_secret_key_2013',
-            'language': 'en',
+            'language': 'eng_us',
         };
 
         // Logging
