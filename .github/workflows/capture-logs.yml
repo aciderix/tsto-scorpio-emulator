@@ -14,7 +14,7 @@ permissions:
 jobs:
   deploy-and-capture:
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 10
 
     steps:
       # ── Checkout ──
@@ -26,8 +26,12 @@ jobs:
         with:
           python-version: '3.12'
 
+      # ── Install dependencies ──
       - name: Install dependencies
-        run: pip install websocket-client
+        run: |
+          pip install playwright
+          playwright install chromium
+          playwright install-deps chromium
 
       # ── Step 1: Deploy sur Netlify ──
       - name: Deploy to Netlify via deploy.py
@@ -39,12 +43,12 @@ jobs:
           echo "⏳ Waiting 10s for CDN propagation..."
           sleep 10
 
-      # ── Step 2: BrowserBase capture ──
-      - name: Capture logs via BrowserBase
-        env:
-          BROWSERBASE_API_KEY: ${{ secrets.BROWSERBASE_API_KEY }}
-          BROWSERBASE_PROJECT_ID: ${{ secrets.BROWSERBASE_PROJECT_ID }}
-        run: python scripts/capture-logs.py
+      # ── Step 2: Playwright capture (replaces BrowserBase) ──
+      - name: Capture logs via Playwright
+        run: |
+          echo "🎭 Running Playwright capture with SwiftShader WebGL..."
+          xvfb-run --auto-servernum --server-args="-screen 0 1280x720x24" \
+            python scripts/capture-logs.py
 
       # ── Step 3: Commit & Push logs ──
       - name: Commit and push logs
