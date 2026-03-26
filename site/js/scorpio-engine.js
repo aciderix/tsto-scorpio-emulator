@@ -984,6 +984,39 @@ class ScorpioEngine {
             r1: this.jni.JOBJECT_BASE,
         }, true));
 
+        // === v26c: Java→Native callbacks (simulate Android Activity behavior) ===
+        // On real Android, the Java activity drives boot sequence by calling these JNI methods.
+        // The native code waits for these callbacks to proceed with networking.
+
+        // 1. Signal DLC download complete (the game expects Java side to manage DLC)
+        Logger.info('Step 9a/11: downloadComplete callback');
+        results.push(this.callFunction('Java_com_ea_simpsons_BackgroundDownloaderJava_downloadComplete', {
+            r0: this.jni.JNIENV_BASE,
+            r1: this.jni.JOBJECT_BASE,
+            r2: 1,  // success = true
+            r3: 0,  // downloadId = 0
+        }, true));
+
+        // 2. Set server time (the Java activity gets this from system clock)
+        var serverTime = Math.floor(Date.now() / 1000);
+        Logger.info('Step 9b/11: serverStartTime(' + serverTime + ')');
+        results.push(this.callFunction('Java_com_ea_simpsons_ScorpioJNI_serverStartTime', {
+            r0: this.jni.JNIENV_BASE,
+            r1: this.jni.JOBJECT_BASE,
+            r2: serverTime & 0xFFFFFFFF,
+            r3: 0,
+        }, true));
+
+        // 3. Set current server time
+        Logger.info('Step 9c/11: serverCurrentTime(' + serverTime + ')');
+        results.push(this.callFunction('Java_com_ea_simpsons_ScorpioJNI_serverCurrentTime', {
+            r0: this.jni.JNIENV_BASE,
+            r1: this.jni.JOBJECT_BASE,
+            r2: serverTime & 0xFFFFFFFF,
+            r3: 0,
+        }, true));
+
+        // 4. Execute pending threads that may have been created
         // === v24: Execute pending background threads ===
         // pthread_create stores routines but doesn't run them (single-threaded emulator).
         // Run them now so asset loaders, initialization threads, etc. complete.
