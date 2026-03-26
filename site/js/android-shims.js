@@ -44,6 +44,11 @@ const AndroidShims = {
     _netRequestCount: 0,
     _netResponseCount: 0,
 
+    // v28: Directory enumeration for opendir/readdir/closedir
+    _dirHandles: new Map(),   // handle_id -> { path, entries[], index }
+    _nextDirHandle: 0xA0000000,
+    _direntBuf: 0,  // allocated buffer for dirent struct
+
     init(engine) {
         this.engine = engine;
         this.vfs = engine.vfs || null;
@@ -57,7 +62,12 @@ const AndroidShims = {
         this._threadsDone = new Set();
         this._condSignaled = new Set();
         this._dlsymStubs = new Map();
-        Logger.info('Android shims v26 initialized (+ ctype/libc/C++ stdlib + enhanced STUB diagnostics)');
+        this._dirHandles = new Map();
+        this._nextDirHandle = 0xA0000000;
+        this._direntBuf = 0;
+        this._filePtrToFd = new Map();
+        this._freadLogCount = 0;
+        Logger.info('Android shims v28 initialized (+ opendir/readdir + FILE* struct + stat64)');
     },
 
     // ============================================
@@ -1055,14 +1065,41 @@ const AndroidShims = {
                     Logger.warn('[fopen] EMPTY path from addr 0x' + (args[0]>>>0).toString(16) + ' mode=' + mode);
                 }
 
-                // v27e: Log ALL fopen attempts
                 Logger.info('[fopen] ATTEMPT: "' + path + '" mode=' + mode);
 
                 // Try VFS first
                 if (self.vfs) {
                     var fd = self.vfs.fopen(path, mode);
                     if (fd) {
-                        Logger.info('[fopen] HIT: ' + path + ' → fd=' + fd);
+                        // v28: Return a heap-allocated FILE struct pointer instead of raw fd
+                        // ARM code may dereference FILE* to read internal fields
+                        // Bionic FILE struct: _flags(4), _IO_read_ptr(4), _IO_read_end(4),
+                        //   _IO_read_base(4), ... _fileno at offset 12-16 (varies by impl)
+                        // We allocate 80 bytes and store the fd at multiple offsets
+                        var filePtr = self.malloc(80);
+                        if (filePtr) {
+                            try {
+                                var fileStruct = new Array(80).fill(0);
+                                // _flags at offset 0: readable flag (0x0001 = _IO_MAGIC | readable)
+                                fileStruct[0] = 0x01; fileStruct[1] = 0xFB; fileStruct[2] = 0xAD; fileStruct[3] = 0xFB;
+                                // Store fd at offset 12 (bionic _file field) and offset 14 (some impls)
+                                fileStruct[12] = fd & 0xFF; fileStruct[13] = (fd >> 8) & 0xFF;
+                                fileStruct[14] = fd & 0xFF; fileStruct[15] = (fd >> 8) & 0xFF;
+                                // Also at offset 16 and 56 for other FILE struct layouts
+                                fileStruct[16] = fd & 0xFF; fileStruct[17] = (fd >> 8) & 0xFF;
+                                fileStruct[56] = fd & 0xFF; fileStruct[57] = (fd >> 8) & 0xFF;
+                                emu.mem_write(filePtr, fileStruct);
+                            } catch(e) {
+                                Logger.warn('[fopen] Failed to write FILE struct: ' + e.message);
+                            }
+                            // Map FILE* pointer back to fd for fread/fclose etc.
+                            if (!self._filePtrToFd) self._filePtrToFd = new Map();
+                            self._filePtrToFd.set(filePtr, fd);
+                            Logger.info('[fopen] HIT: ' + path + ' -> fd=' + fd + ' FILE*=0x' + filePtr.toString(16));
+                            return filePtr;
+                        }
+                        // Fallback: return fd directly
+                        Logger.info('[fopen] HIT (raw fd): ' + path + ' -> fd=' + fd);
                         return fd;
                     }
                 }
@@ -1072,7 +1109,14 @@ const AndroidShims = {
                 return 0;
             },
             'fclose':  function(emu, args) {
-                var fd = args[0];
+                var filePtr = args[0];
+                // v28: Resolve FILE* to fd
+                var fd = filePtr;
+                if (self._filePtrToFd && self._filePtrToFd.has(filePtr)) {
+                    fd = self._filePtrToFd.get(filePtr);
+                    self._filePtrToFd.delete(filePtr);
+                    self.free(filePtr); // free the FILE struct
+                }
                 if (self.vfs && fd >= 100) {
                     return self.vfs.fclose(fd);
                 }
@@ -1082,16 +1126,31 @@ const AndroidShims = {
                 var destPtr = args[0];
                 var itemSize = args[1];
                 var itemCount = args[2];
-                var fd = args[3];
+                var filePtr = args[3];
+                // v28: Resolve FILE* pointer to VFS fd
+                var fd = (self._filePtrToFd && self._filePtrToFd.has(filePtr)) ? self._filePtrToFd.get(filePtr) : filePtr;
 
                 if (self.vfs && fd >= 100) {
+                    var posBefore = self.vfs.ftell(fd);
                     var result = self.vfs.fread(fd, destPtr, itemSize, itemCount, emu);
-                    // v27e: Log file reads for debugging BGrm text pool loading
+                    // v28: Extended logging — log ALL fread calls with data preview
                     if (self._freadLogCount === undefined) self._freadLogCount = 0;
-                    if (self._freadLogCount < 50) {
+                    if (self._freadLogCount < 200) {
                         self._freadLogCount++;
                         var totalBytes = itemSize * result;
-                        Logger.info('[fread] fd=' + fd + ' size=' + itemSize + ' count=' + itemCount + ' → ' + result + ' items (' + totalBytes + ' bytes)');
+                        var preview = '';
+                        if (totalBytes > 0 && totalBytes <= 32 && destPtr) {
+                            try {
+                                var readBytes = emu.mem_read(destPtr, Math.min(totalBytes, 16));
+                                preview = ' data=[' + Array.from(readBytes).map(function(b) { return '0x' + b.toString(16).padStart(2, '0'); }).join(',') + ']';
+                                var ascii = '';
+                                for (var bi = 0; bi < readBytes.length; bi++) {
+                                    ascii += (readBytes[bi] >= 32 && readBytes[bi] < 127) ? String.fromCharCode(readBytes[bi]) : '.';
+                                }
+                                preview += ' "' + ascii + '"';
+                            } catch(e) {}
+                        }
+                        Logger.info('[fread] fd=' + fd + ' pos=' + posBefore + ' size=' + itemSize + ' count=' + itemCount + ' -> ' + result + ' items (' + totalBytes + ' bytes)' + preview);
                     }
                     return result;
                 }
@@ -1101,32 +1160,41 @@ const AndroidShims = {
             'fgets':   function(emu, args) {
                 var destPtr = args[0];
                 var maxLen = args[1];
-                var fd = args[2];
-                
+                var filePtr = args[2];
+                var fd = (self._filePtrToFd && self._filePtrToFd.has(filePtr)) ? self._filePtrToFd.get(filePtr) : filePtr;
+
                 if (self.vfs && fd >= 100) {
                     return self.vfs.fgets(fd, destPtr, maxLen, emu);
                 }
                 return 0;
             },
             'fseek':   function(emu, args) {
-                var fd = args[0];
+                var filePtr = args[0];
+                var fd = (self._filePtrToFd && self._filePtrToFd.has(filePtr)) ? self._filePtrToFd.get(filePtr) : filePtr;
                 var offset = args[1] | 0; // signed
                 var whence = args[2];
-                
+
                 if (self.vfs && fd >= 100) {
-                    return self.vfs.fseek(fd, offset, whence);
+                    var result = self.vfs.fseek(fd, offset, whence);
+                    var whenceStr = whence === 0 ? 'SET' : whence === 1 ? 'CUR' : 'END';
+                    Logger.info('[fseek] fd=' + fd + ' offset=' + offset + ' whence=' + whenceStr + ' -> pos=' + self.vfs.ftell(fd));
+                    return result;
                 }
                 return -1;
             },
             'ftell':   function(emu, args) {
-                var fd = args[0];
+                var filePtr = args[0];
+                var fd = (self._filePtrToFd && self._filePtrToFd.has(filePtr)) ? self._filePtrToFd.get(filePtr) : filePtr;
                 if (self.vfs && fd >= 100) {
-                    return self.vfs.ftell(fd);
+                    var pos = self.vfs.ftell(fd);
+                    Logger.info('[ftell] fd=' + fd + ' -> ' + pos);
+                    return pos;
                 }
                 return -1;
             },
             'feof':    function(emu, args) {
-                var fd = args[0];
+                var filePtr = args[0];
+                var fd = (self._filePtrToFd && self._filePtrToFd.has(filePtr)) ? self._filePtrToFd.get(filePtr) : filePtr;
                 if (self.vfs && fd >= 100) {
                     return self.vfs.feof(fd);
                 }
@@ -1136,11 +1204,13 @@ const AndroidShims = {
             'fflush':  function(emu, args) { return 0; },
             'open':    function(emu, args) {
                 var path = self._readCString(emu, args[0]);
+                var flags = args[1];
+                Logger.info('[open] ATTEMPT: "' + path + '" flags=0x' + (flags>>>0).toString(16));
                 // For POSIX open(), try VFS too
                 if (self.vfs && self.vfs.exists(path)) {
                     var fd = self.vfs.fopen(path, 'r');
                     if (fd) {
-                        Logger.info('[open] VFS HIT: ' + path + ' → fd=' + fd);
+                        Logger.info('[open] VFS HIT: ' + path + ' -> fd=' + fd);
                         return fd;
                     }
                 }
@@ -1182,7 +1252,38 @@ const AndroidShims = {
                     Logger.info('[stat] VFS HIT: ' + path + ' size=' + size);
                     return 0;
                 }
+                // v28: Check if path is a directory in VFS
+                if (self.vfs && path) {
+                    var dirPath = path.replace(/\/+$/, '') + '/';
+                    var normalized = self.vfs._normalizePath(dirPath);
+                    for (var entry of self.vfs._files) {
+                        if (entry[0].indexOf(normalized) === 0) {
+                            // It's a directory — write stat with S_IFDIR
+                            if (args[1]) {
+                                try {
+                                    var zeros = new Array(128).fill(0);
+                                    emu.mem_write(args[1], zeros);
+                                    var dirMode = 0x4000 | 0x1ED; // S_IFDIR | 0755
+                                    emu.mem_write(args[1] + 8, [dirMode & 0xFF, (dirMode >> 8) & 0xFF, 0, 0]);
+                                } catch(e) {}
+                            }
+                            Logger.info('[stat] VFS DIR HIT: ' + path);
+                            return 0;
+                        }
+                    }
+                }
+                Logger.info('[stat] MISS: ' + path);
                 return -1;
+            },
+            // v28: stat64 alias — ARM Android often uses this
+            'stat64':  function(emu, args) {
+                return self.engine.shims['stat'](emu, args);
+            },
+            'lstat':   function(emu, args) {
+                return self.engine.shims['stat'](emu, args);
+            },
+            'lstat64': function(emu, args) {
+                return self.engine.shims['stat'](emu, args);
             },
             'fstat':   function(emu, args) {
                 // fstat on a VFS fd
@@ -1205,12 +1306,27 @@ const AndroidShims = {
                 }
                 return -1;
             },
+            'fstat64': function(emu, args) {
+                return self.engine.shims['fstat'](emu, args);
+            },
             'access':  function(emu, args) {
                 var path = self._readCString(emu, args[0]);
                 if (self.vfs && self.vfs.exists(path)) {
                     Logger.info('[access] VFS HIT: ' + path);
                     return 0;
                 }
+                // v28: Also check if it's a directory (has children in VFS)
+                if (self.vfs && path) {
+                    var dirPath = path.replace(/\/+$/, '') + '/';
+                    var normalized = self.vfs._normalizePath(dirPath);
+                    for (var entry of self.vfs._files) {
+                        if (entry[0].indexOf(normalized) === 0) {
+                            Logger.info('[access] VFS DIR HIT: ' + path);
+                            return 0;
+                        }
+                    }
+                }
+                Logger.info('[access] MISS: ' + path);
                 return -1;
             },
             'mkdir':   function(emu, args) { return 0; },
@@ -2053,9 +2169,106 @@ const AndroidShims = {
                 return args[0];
             },
             'chdir': function(emu, args) { return 0; },
-            'opendir': function(emu, args) { return 0; },
-            'readdir': function(emu, args) { return 0; },
-            'closedir': function(emu, args) { return 0; },
+
+            // v28: Directory enumeration backed by VFS
+            'opendir': function(emu, args) {
+                var path = self._readCString(emu, args[0]);
+                Logger.info('[opendir] ATTEMPT: "' + path + '"');
+
+                if (!self.vfs || !path) return 0;
+
+                // Normalize: ensure path ends with /
+                var dirPath = path.replace(/\/+$/, '') + '/';
+                var normalized = self.vfs._normalizePath(dirPath);
+
+                // Collect filenames in this directory from VFS
+                var entries = [];
+                var seen = {};
+                for (var entry of self.vfs._files) {
+                    var key = entry[0]; // normalized VFS path
+                    if (key.indexOf(normalized) === 0) {
+                        // key starts with our dir path — extract the relative part
+                        var relative = key.substring(normalized.length);
+                        // Only direct children (no sub-slash), skip empty
+                        var slashIdx = relative.indexOf('/');
+                        var childName;
+                        if (slashIdx < 0) {
+                            childName = relative; // file
+                        } else {
+                            childName = relative.substring(0, slashIdx); // subdirectory
+                        }
+                        if (childName && !seen[childName]) {
+                            seen[childName] = true;
+                            entries.push(childName);
+                        }
+                    }
+                }
+
+                if (entries.length === 0) {
+                    Logger.info('[opendir] MISS (no entries): "' + path + '" normalized="' + normalized + '"');
+                    return 0; // NULL — directory not found
+                }
+
+                var handle = self._nextDirHandle++;
+                self._dirHandles.set(handle, { path: path, entries: entries, index: 0 });
+                Logger.info('[opendir] HIT: "' + path + '" → handle=0x' + handle.toString(16) + ' (' + entries.length + ' entries: ' + entries.slice(0, 10).join(', ') + (entries.length > 10 ? '...' : '') + ')');
+                return handle;
+            },
+
+            'readdir': function(emu, args) {
+                var handle = args[0];
+                var dir = self._dirHandles.get(handle);
+                if (!dir) return 0; // NULL — end of directory or invalid
+
+                if (dir.index >= dir.entries.length) {
+                    return 0; // NULL — no more entries
+                }
+
+                var name = dir.entries[dir.index++];
+
+                // Allocate a persistent dirent buffer if we haven't yet
+                // ARM dirent struct: d_ino(4) + d_off(4) + d_reclen(2) + d_type(1) + d_name(256)
+                if (!self._direntBuf) {
+                    self._direntBuf = self.malloc(280);
+                }
+                var buf = self._direntBuf;
+
+                // Write dirent struct
+                var bytes = [];
+                // d_ino (4 bytes) — fake inode
+                bytes.push(dir.index & 0xFF, (dir.index >> 8) & 0xFF, 0, 0);
+                // d_off (4 bytes) — fake offset
+                bytes.push(dir.index & 0xFF, 0, 0, 0);
+                // d_reclen (2 bytes)
+                var reclen = 11 + name.length + 1; // header + name + null
+                bytes.push(reclen & 0xFF, (reclen >> 8) & 0xFF);
+                // d_type (1 byte) — DT_REG=8 for files, DT_DIR=4 for dirs
+                bytes.push(8);
+                // d_name (null-terminated string)
+                for (var i = 0; i < name.length; i++) {
+                    bytes.push(name.charCodeAt(i) & 0xFF);
+                }
+                bytes.push(0); // null terminator
+                // Pad to 280 bytes total
+                while (bytes.length < 280) bytes.push(0);
+
+                emu.mem_write(buf, bytes);
+
+                if (dir.index <= 5) {
+                    Logger.info('[readdir] handle=0x' + handle.toString(16) + ' → "' + name + '" (' + dir.index + '/' + dir.entries.length + ')');
+                }
+
+                return buf;
+            },
+
+            'closedir': function(emu, args) {
+                var handle = args[0];
+                if (self._dirHandles.has(handle)) {
+                    Logger.info('[closedir] handle=0x' + handle.toString(16));
+                    self._dirHandles.delete(handle);
+                }
+                return 0;
+            },
             // ============================================
             // v26: Missing critical libc/ctype/C++ functions
             // ============================================
