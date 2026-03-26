@@ -10,16 +10,51 @@
 class GLBridge {
     constructor(canvas) {
         this.canvas = canvas;
-        this.gl = canvas.getContext('webgl', {
+        this.headless = false;
+
+        // v22: Detailed WebGL diagnostic
+        if (!canvas) {
+            console.error('[GL] Canvas is null/undefined!');
+            this.headless = true;
+            this.gl = null;
+            return;
+        }
+        console.log('[GL] Canvas: ' + canvas.width + 'x' + canvas.height + ', id=' + canvas.id + ', tagName=' + canvas.tagName);
+
+        // Try WebGL2 first, then WebGL1
+        this.gl = null;
+        var contextNames = ['webgl2', 'webgl', 'experimental-webgl'];
+        var attrs = {
             alpha: false,
             antialias: false,
             preserveDrawingBuffer: true,
             depth: true,
             stencil: true,
-        }) || canvas.getContext('experimental-webgl');
+            failIfMajorPerformanceCaveat: false,
+            powerPreference: 'default',
+        };
+        for (var i = 0; i < contextNames.length; i++) {
+            try {
+                this.gl = canvas.getContext(contextNames[i], attrs);
+                if (this.gl) {
+                    console.log('[GL] Got context: ' + contextNames[i]);
+                    break;
+                }
+            } catch(e) {
+                console.warn('[GL] getContext(' + contextNames[i] + ') threw: ' + e.message);
+            }
+        }
 
         if (!this.gl) {
-            console.warn('[GL] WebGL not available - running in headless mode');
+            // Last resort: try with no attributes at all
+            try {
+                this.gl = canvas.getContext('webgl');
+            } catch(e) {}
+        }
+
+        if (!this.gl) {
+            console.error('[GL] ALL WebGL context attempts failed! Canvas may be in a restricted context.');
+            console.error('[GL] window.WebGLRenderingContext exists: ' + !!window.WebGLRenderingContext);
             this.headless = true;
             return;
         }
@@ -211,6 +246,34 @@ class GLBridge {
      * Each shim: (emu, [R0, R1, R2, R3]) => return_value
      */
     getShims() {
+        // v22: If headless, return no-op shims that won't crash
+        if (this.headless || !this.gl) {
+            Logger.warn('[GL] Headless mode — returning no-op GL shims');
+            var noop = function() { return 0; };
+            var glNames = [
+                'glEnable','glDisable','glBlendFunc','glCullFace','glFrontFace','glLineWidth',
+                'glViewport','glScissor','glClearColor','glClear','glDepthFunc','glDepthMask',
+                'glDepthRangef','glStencilFunc','glStencilOp','glStencilMask','glColorMask',
+                'glGenTextures','glBindTexture','glTexImage2D','glTexParameteri',
+                'glDeleteTextures','glActiveTexture','glPixelStorei','glCompressedTexImage2D',
+                'glGenerateMipmap','glGenBuffers','glBindBuffer','glBufferData','glBufferSubData',
+                'glDeleteBuffers','glCreateShader','glShaderSource','glCompileShader',
+                'glCreateProgram','glAttachShader','glLinkProgram','glUseProgram',
+                'glGetAttribLocation','glGetUniformLocation','glEnableVertexAttribArray',
+                'glDisableVertexAttribArray','glVertexAttribPointer','glDrawArrays',
+                'glDrawElements','glUniform1i','glUniform1f','glUniform2f','glUniform3f',
+                'glUniform4f','glUniform4fv','glUniformMatrix4fv','glGetShaderiv',
+                'glGetProgramiv','glGetShaderInfoLog','glGetProgramInfoLog','glDeleteShader',
+                'glDeleteProgram','glGetError','glMapBufferOES','glUnmapBufferOES',
+                'glBlendFuncSeparate','glTexSubImage2D',
+            ];
+            var shims = {};
+            for (var i = 0; i < glNames.length; i++) {
+                shims[glNames[i]] = noop;
+            }
+            return shims;
+        }
+
         var gl = this.gl;
         var self = this;
 
@@ -1006,6 +1069,239 @@ class GLBridge {
         gl.vertexAttribPointer(colLoc, 3, gl.FLOAT, false, 20, 8);
         gl.drawArrays(gl.TRIANGLE_FAN, 0, 4);
         Logger.gl('Test pattern drawn');
+    }
+
+    // ================================================================
+    // LOADING SCREEN (JS-side rendering while native engine initializes)
+    // ================================================================
+
+    drawLoadingScreen(frameNum) {
+        var gl = this.gl;
+        if (!gl) return;
+
+        // === Try to load real splash textures (once) ===
+        if (!this._splashInitStarted) {
+            this._splashInitStarted = true;
+            this._splashReady = false;
+            if (window.SplashLoader) {
+                var self = this;
+                var loader = new SplashLoader();
+                loader.load().then(function(count) {
+                    if (count > 0) {
+                        self._splashTex = loader.createGLTexture(gl, 'splashscreen');
+                        self._homerTex = loader.createGLTexture(gl, 'splash_homer');
+                        self._fingerTex = loader.createGLTexture(gl, 'splashfinger');
+                        self._splashReady = !!self._splashTex;
+                        if (self._splashReady) {
+                            console.log('[GL] Real splash textures loaded!');
+                        }
+                    }
+                });
+            }
+        }
+
+        // === Create shader programs (once) ===
+        if (!this._loadingProg) {
+            // -- Procedural fallback shader (donut + progress bar) --
+            var vs = gl.createShader(gl.VERTEX_SHADER);
+            gl.shaderSource(vs, 'attribute vec2 aPos; attribute vec2 aUV; varying vec2 vUV; void main() { gl_Position = vec4(aPos, 0.0, 1.0); vUV = aUV; }');
+            gl.compileShader(vs);
+
+            var fs = gl.createShader(gl.FRAGMENT_SHADER);
+            gl.shaderSource(fs, [
+                'precision mediump float;',
+                'varying vec2 vUV;',
+                'uniform float uTime;',
+                'uniform float uProgress;',
+                'void main() {',
+                '  vec3 skyTop = vec3(0.30, 0.65, 0.95);',
+                '  vec3 skyBot = vec3(0.55, 0.82, 0.98);',
+                '  vec3 bg = mix(skyBot, skyTop, vUV.y);',
+                '  if (vUV.y < 0.25) {',
+                '    bg = mix(vec3(0.30, 0.65, 0.15), bg, vUV.y / 0.25);',
+                '  }',
+                '  vec2 barCenter = vec2(0.5, 0.15);',
+                '  vec2 barSize = vec2(0.35, 0.02);',
+                '  vec2 d = abs(vUV - barCenter);',
+                '  if (d.x < barSize.x && d.y < barSize.y) {',
+                '    float fillX = (vUV.x - (barCenter.x - barSize.x)) / (2.0 * barSize.x);',
+                '    if (fillX < uProgress) {',
+                '      float pulse = 0.85 + 0.15 * sin(uTime * 3.0 + fillX * 10.0);',
+                '      bg = vec3(1.0, 0.82, 0.0) * pulse;',
+                '    } else { bg = vec3(0.2, 0.2, 0.3); }',
+                '  }',
+                '  float cx = 0.5 + 0.03 * sin(uTime * 1.5);',
+                '  float dist = length(vUV - vec2(cx, 0.72));',
+                '  if (dist < 0.08 && dist > 0.04) {',
+                '    float ring = smoothstep(0.04, 0.05, dist) * smoothstep(0.08, 0.07, dist);',
+                '    bg = mix(bg, vec3(0.95, 0.55, 0.70) * (0.8 + 0.2 * sin(uTime * 4.0)), ring * 0.9);',
+                '  }',
+                '  if (dist < 0.065 && dist > 0.04 && vUV.y > 0.72) {',
+                '    bg = mix(bg, vec3(1.0, 0.4, 0.7), 0.7);',
+                '  }',
+                '  gl_FragColor = vec4(bg, 1.0);',
+                '}'
+            ].join('\n'));
+            gl.compileShader(fs);
+
+            var prog = gl.createProgram();
+            gl.attachShader(prog, vs);
+            gl.attachShader(prog, fs);
+            gl.linkProgram(prog);
+
+            // -- Textured splash shader (used when real textures are available) --
+            var vs2 = gl.createShader(gl.VERTEX_SHADER);
+            gl.shaderSource(vs2, [
+                'attribute vec2 aPos;',
+                'attribute vec2 aUV;',
+                'varying vec2 vUV;',
+                'uniform vec2 uUVScale;',
+                'void main() {',
+                '  gl_Position = vec4(aPos, 0.0, 1.0);',
+                '  vUV = aUV * uUVScale;',
+                '}'
+            ].join('\n'));
+            gl.compileShader(vs2);
+
+            var fs2 = gl.createShader(gl.FRAGMENT_SHADER);
+            gl.shaderSource(fs2, [
+                'precision mediump float;',
+                'varying vec2 vUV;',
+                'uniform sampler2D uSplash;',
+                'uniform sampler2D uHomer;',
+                'uniform float uTime;',
+                'uniform float uProgress;',
+                'uniform float uHasHomer;',
+                'void main() {',
+                '  // Sample background splash (flipped Y for OpenGL)',
+                '  vec4 bg = texture2D(uSplash, vec2(vUV.x, 1.0 - vUV.y));',
+                '  // Overlay Homer sprite (centered, scaled)',
+                '  if (uHasHomer > 0.5) {',
+                '    vec2 hUV = (vUV - vec2(0.35, 0.2)) * vec2(2.5, 2.0);',
+                '    if (hUV.x >= 0.0 && hUV.x <= 1.0 && hUV.y >= 0.0 && hUV.y <= 1.0) {',
+                '      vec4 homer = texture2D(uHomer, vec2(hUV.x * 0.674, 1.0 - hUV.y * 0.925));',
+                '      if (homer.a > 0.1) bg = mix(bg, homer, homer.a);',
+                '    }',
+                '  }',
+                '  // Progress bar overlay',
+                '  vec2 barC = vec2(0.5, 0.08);',
+                '  vec2 barS = vec2(0.35, 0.015);',
+                '  vec2 d = abs(vUV - barC);',
+                '  if (d.x < barS.x && d.y < barS.y) {',
+                '    float fillX = (vUV.x - (barC.x - barS.x)) / (2.0 * barS.x);',
+                '    if (fillX < uProgress) {',
+                '      float pulse = 0.85 + 0.15 * sin(uTime * 3.0 + fillX * 10.0);',
+                '      bg = vec4(vec3(1.0, 0.82, 0.0) * pulse, 1.0);',
+                '    } else {',
+                '      bg = vec4(0.15, 0.15, 0.25, 1.0);',
+                '    }',
+                '    // Bar border',
+                '    if (d.x > barS.x - 0.003 || d.y > barS.y - 0.002) {',
+                '      bg = vec4(0.8, 0.7, 0.3, 1.0);',
+                '    }',
+                '  }',
+                '  gl_FragColor = bg;',
+                '}'
+            ].join('\n'));
+            gl.compileShader(fs2);
+
+            if (!gl.getShaderParameter(fs2, gl.COMPILE_STATUS)) {
+                console.error('[GL] Splash FS error:', gl.getShaderInfoLog(fs2));
+            }
+
+            var prog2 = gl.createProgram();
+            gl.attachShader(prog2, vs2);
+            gl.attachShader(prog2, fs2);
+            gl.linkProgram(prog2);
+
+            // Fullscreen quad: pos(x,y) + uv(u,v)
+            var verts = new Float32Array([
+                -1, -1, 0, 0,
+                 1, -1, 1, 0,
+                 1,  1, 1, 1,
+                -1,  1, 0, 1,
+            ]);
+            var buf = gl.createBuffer();
+            gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+            gl.bufferData(gl.ARRAY_BUFFER, verts, gl.STATIC_DRAW);
+
+            this._loadingProg = prog;
+            this._splashProg = prog2;
+            this._loadingBuf = buf;
+            this._loadingTimeLoc = gl.getUniformLocation(prog, 'uTime');
+            this._loadingProgressLoc = gl.getUniformLocation(prog, 'uProgress');
+            this._loadingPosLoc = gl.getAttribLocation(prog, 'aPos');
+            this._loadingUVLoc = gl.getAttribLocation(prog, 'aUV');
+            // Splash shader uniforms
+            this._splashTimeLoc = gl.getUniformLocation(prog2, 'uTime');
+            this._splashProgressLoc = gl.getUniformLocation(prog2, 'uProgress');
+            this._splashUVScaleLoc = gl.getUniformLocation(prog2, 'uUVScale');
+            this._splashTexLoc = gl.getUniformLocation(prog2, 'uSplash');
+            this._splashHomerLoc = gl.getUniformLocation(prog2, 'uHomer');
+            this._splashHasHomerLoc = gl.getUniformLocation(prog2, 'uHasHomer');
+            this._splashPosLoc = gl.getAttribLocation(prog2, 'aPos');
+            this._splashUVLoc = gl.getAttribLocation(prog2, 'aUV');
+            this._loadingStartTime = performance.now();
+        }
+
+        var elapsed = (performance.now() - this._loadingStartTime) / 1000.0;
+        var progress = 1.0 - Math.exp(-elapsed / 15.0);
+
+        gl.viewport(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight);
+        gl.disable(gl.DEPTH_TEST);
+        gl.disable(gl.BLEND);
+        gl.bindBuffer(gl.ARRAY_BUFFER, this._loadingBuf);
+
+        // === Use real splash textures if available ===
+        if (this._splashReady && this._splashTex) {
+            var prog2 = this._splashProg;
+            gl.useProgram(prog2);
+
+            gl.enableVertexAttribArray(this._splashPosLoc);
+            gl.enableVertexAttribArray(this._splashUVLoc);
+            gl.vertexAttribPointer(this._splashPosLoc, 2, gl.FLOAT, false, 16, 0);
+            gl.vertexAttribPointer(this._splashUVLoc, 2, gl.FLOAT, false, 16, 8);
+
+            // Bind splash background texture
+            gl.activeTexture(gl.TEXTURE0);
+            gl.bindTexture(gl.TEXTURE_2D, this._splashTex);
+            gl.uniform1i(this._splashTexLoc, 0);
+            gl.uniform2f(this._splashUVScaleLoc,
+                         this._splashTex._uvScaleX || 1.0,
+                         this._splashTex._uvScaleY || 1.0);
+
+            // Bind Homer overlay if available
+            if (this._homerTex) {
+                gl.activeTexture(gl.TEXTURE1);
+                gl.bindTexture(gl.TEXTURE_2D, this._homerTex);
+                gl.uniform1i(this._splashHomerLoc, 1);
+                gl.uniform1f(this._splashHasHomerLoc, 1.0);
+            } else {
+                gl.uniform1f(this._splashHasHomerLoc, 0.0);
+            }
+
+            gl.uniform1f(this._splashTimeLoc, elapsed);
+            gl.uniform1f(this._splashProgressLoc, progress);
+            gl.drawArrays(gl.TRIANGLE_FAN, 0, 4);
+
+            gl.disableVertexAttribArray(this._splashPosLoc);
+            gl.disableVertexAttribArray(this._splashUVLoc);
+            return;
+        }
+
+        // === Fallback: procedural donut loading screen ===
+        var prog = this._loadingProg;
+        gl.useProgram(prog);
+        gl.enableVertexAttribArray(this._loadingPosLoc);
+        gl.enableVertexAttribArray(this._loadingUVLoc);
+        gl.vertexAttribPointer(this._loadingPosLoc, 2, gl.FLOAT, false, 16, 0);
+        gl.vertexAttribPointer(this._loadingUVLoc, 2, gl.FLOAT, false, 16, 8);
+        gl.uniform1f(this._loadingTimeLoc, elapsed);
+        gl.uniform1f(this._loadingProgressLoc, progress);
+        gl.drawArrays(gl.TRIANGLE_FAN, 0, 4);
+
+        gl.disableVertexAttribArray(this._loadingPosLoc);
+        gl.disableVertexAttribArray(this._loadingUVLoc);
     }
 
     // ================================================================

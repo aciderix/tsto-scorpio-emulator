@@ -4,3 +4,4 @@ test-logs.txt
 screenshots/
 *.log
 package-lock.json
+refs/

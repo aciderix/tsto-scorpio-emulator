@@ -1,0 +1,56 @@
+name: Deploy & Capture TSTO Logs
+
+on:
+  push:
+    branches:
+      - 'claude/**'          # Toute branche claude/*
+    paths-ignore:
+      - 'logs/**'            # Ignore les commits de logs (évite boucle infinie)
+  workflow_dispatch:          # Trigger manuel depuis GitHub UI
+
+permissions:
+  contents: write
+
+jobs:
+  deploy-and-capture:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+
+    steps:
+      # ── Checkout ──
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install websocket-client
+
+      # ── Step 1: Deploy sur Netlify ──
+      - name: Deploy to Netlify via deploy.py
+        env:
+          NETLIFY_TOKEN: ${{ secrets.NETLIFY_TOKEN }}
+        run: |
+          echo "🚀 Deploying to Netlify..."
+          python scripts/deploy.py
+          echo "⏳ Waiting 10s for CDN propagation..."
+          sleep 10
+
+      # ── Step 2: BrowserBase capture ──
+      - name: Capture logs via BrowserBase
+        env:
+          BROWSERBASE_API_KEY: ${{ secrets.BROWSERBASE_API_KEY }}
+          BROWSERBASE_PROJECT_ID: ${{ secrets.BROWSERBASE_PROJECT_ID }}
+        run: python scripts/capture-logs.py
+
+      # ── Step 3: Commit & Push logs ──
+      - name: Commit and push logs
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add logs/
+          git diff --staged --quiet || git commit -m "🤖 Auto-captured logs $(date -u +%Y%m%d-%H%M%S)"
+          git push

@@ -90,9 +90,25 @@ class JNIBridge {
         // JNIEnv* → vtable (correct single indirection)
         this._writeU32(this.JNIENV_BASE, this.JNIENV_VTABLE);
 
-        // Fill vtable with default return stub
-        for (var i = 0; i < 256; i++) {
-            this._writeU32(this.JNIENV_VTABLE + i * 4, this.RETURN_STUB);
+        // Fill vtable with unique addresses per slot (for debugging unhandled JNI calls)
+        // Each slot gets RETURN_STUB + slot*4 — all map to the same page with BX LR
+        this.JNI_STUB_BASE = 0xE0080000; // dedicated JNI stub page
+        try {
+            emu.mem_map(this.JNI_STUB_BASE, 0x1000, uc.PROT_ALL);
+            // Write MOV R0, #0; BX LR at each 8-byte aligned slot
+            for (var i = 0; i < 256; i++) {
+                var stubAddr = this.JNI_STUB_BASE + i * 8;
+                emu.mem_write(stubAddr, [
+                    0x00, 0x00, 0xA0, 0xE3,  // MOV R0, #0
+                    0x1E, 0xFF, 0x2F, 0xE1,  // BX LR
+                ]);
+                this._writeU32(this.JNIENV_VTABLE + i * 4, stubAddr);
+            }
+        } catch(e) {
+            // Fallback: use generic return stub
+            for (var i = 0; i < 256; i++) {
+                this._writeU32(this.JNIENV_VTABLE + i * 4, this.RETURN_STUB);
+            }
         }
 
         // JavaVM* → vtable
@@ -314,7 +330,26 @@ class JNIBridge {
             130: { name: 'CallStaticIntMethodV', handler: function(emu, args) { return 0; } },
             131: { name: 'CallStaticIntMethodA', handler: function(emu, args) { return 0; } },
             126: { name: 'CallStaticShortMethod', handler: function(emu, args) { return 0; } },
-            132: { name: 'CallStaticLongMethod', handler: function(emu, args) { return 0; } },
+            132: { name: 'CallStaticLongMethod', handler: function(emu, args) {
+                var method = self._methodRegistry.get(args[2]);
+                var name = method ? method.name : '?';
+                self._logJNI('CallStaticLongMethod', name + ' class=0x' + (args[1]>>>0).toString(16));
+                // Return large value (e.g. available storage space in bytes)
+                // Long on ARM: low 32 bits in R0, high 32 bits in R1
+                try { emu.reg_write(1, [0, 0, 0, 0]); } catch(e) {} // R1 = 0 (high)
+                return 0x40000000; // ~1GB (low 32 bits)
+            }},
+            133: { name: 'CallStaticLongMethodV', handler: function(emu, args) {
+                var method = self._methodRegistry.get(args[2]);
+                var name = method ? method.name : '?';
+                self._logJNI('CallStaticLongMethodV', name + ' class=0x' + (args[1]>>>0).toString(16));
+                try { emu.reg_write(1, [0, 0, 0, 0]); } catch(e) {} // R1 = 0 (high)
+                return 0x40000000; // ~1GB
+            }},
+            134: { name: 'CallStaticLongMethodA', handler: function(emu, args) {
+                try { emu.reg_write(1, [0, 0, 0, 0]); } catch(e) {}
+                return 0x40000000;
+            }},
             135: { name: 'CallStaticFloatMethod', handler: function(emu, args) { return 0; } },
             138: { name: 'CallStaticDoubleMethod', handler: function(emu, args) { return 0; } },
             141: { name: 'CallStaticVoidMethod', handler: function(emu, args) {
@@ -447,8 +482,60 @@ class JNIBridge {
                 return 0;
             }},
 
-            220: { name: 'GetStringRegion', handler: function(emu, args) { return 0; } },
-            221: { name: 'GetStringUTFRegion', handler: function(emu, args) { return 0; } },
+            220: { name: 'GetStringRegion', handler: function(emu, args) {
+                // GetStringRegion(env, jstring, start, len, buf) — UTF-16
+                var stringId = args[1];
+                var start = args[2];
+                var len = args[3];
+                var sp = 0;
+                try {
+                    var spReg = emu.reg_read(uc.ARM_REG_SP);
+                    sp = emu.mem_read(spReg, 4);
+                    sp = sp[0] | (sp[1] << 8) | (sp[2] << 16) | (sp[3] << 24);
+                } catch(e) { sp = 0; }
+                var buf = sp;
+                if (!buf) return 0;
+                var str = self._strings.get(stringId) || '';
+                var sub = str.substring(start, start + len);
+                var bytes = [];
+                for (var i = 0; i < sub.length; i++) {
+                    var c = sub.charCodeAt(i);
+                    bytes.push(c & 0xFF, (c >> 8) & 0xFF); // UTF-16LE
+                }
+                try { emu.mem_write(buf, bytes); } catch(e) {}
+                return 0;
+            }},
+            221: { name: 'GetStringUTFRegion', handler: function(emu, args) {
+                // GetStringUTFRegion(env, jstring, start, len, buf)
+                var stringId = args[1];
+                var start = args[2];
+                var len = args[3];
+                // buf is passed on the stack (5th arg) — read from SP+0
+                var sp = 0;
+                try {
+                    var spReg = emu.reg_read(uc.ARM_REG_SP);
+                    sp = emu.mem_read(spReg, 4);
+                    sp = sp[0] | (sp[1] << 8) | (sp[2] << 16) | (sp[3] << 24);
+                } catch(e) { sp = 0; }
+                var buf = sp;
+                if (!buf) {
+                    // Fallback: try using _getOrWriteStringPtr so at least the string is in memory
+                    self._getOrWriteStringPtr(emu, stringId);
+                    return 0;
+                }
+                var str = self._strings.get(stringId) || '';
+                var sub = str.substring(start, start + len);
+                var bytes = [];
+                for (var i = 0; i < sub.length; i++) {
+                    bytes.push(sub.charCodeAt(i) & 0xFF);
+                }
+                bytes.push(0); // null terminator
+                try { emu.mem_write(buf, bytes); } catch(e) {
+                    Logger.warn('GetStringUTFRegion: failed to write to buf 0x' + (buf>>>0).toString(16));
+                }
+                self._logJNI('GetStringUTFRegion', '"' + sub.substring(0, 60) + '" → buf 0x' + (buf>>>0).toString(16));
+                return 0;
+            }},
             222: { name: 'GetPrimitiveArrayCritical', handler: function(emu, args) { return 0; } },
             223: { name: 'ReleasePrimitiveArrayCritical', handler: function(emu, args) { return 0; } },
             224: { name: 'GetStringCritical', handler: function(emu, args) {
@@ -871,10 +958,27 @@ class JNIBridge {
             }
             
             // v15.5: SharedPreferences support
-            if (nameLower === 'getsharedpreference' || nameLower === 'getsharedpreferences' || 
-                nameLower.indexOf('sharedpreference') >= 0) {
-                var keyHandle = args[3]; // R3 = Java string handle for the preference key
+            // Match both getSharedPreferences() and getString() on a SharedPrefs object
+            if (nameLower === 'getsharedpreference' || nameLower === 'getsharedpreferences' ||
+                nameLower.indexOf('sharedpreference') >= 0 ||
+                nameLower === 'getstring') {
+                // For CallStaticObjectMethod: args = [env, clazz, mid, arg0]
+                // arg0 (R3) = the jstring key handle
+                var keyHandle = args[3];
                 var key = this._strings.get(keyHandle) || '';
+                // R3 is often a va_list pointer (stack address) when called via
+                // CallStaticObjectMethodV — read the actual jstring handle from it
+                if (!key && keyHandle) {
+                    try {
+                        var vaBytes = emu.mem_read(keyHandle, 4);
+                        var realHandle = (vaBytes[0] | (vaBytes[1] << 8) | (vaBytes[2] << 16) | (vaBytes[3] << 24)) >>> 0;
+                        key = this._strings.get(realHandle) || '';
+                        if (!key) {
+                            // Maybe the string is written directly in ARM memory at that address
+                            key = this._readCString(emu, realHandle);
+                        }
+                    } catch(e) {}
+                }
                 var value = this._sharedPreferences[key];
                 if (value === undefined) value = '';
                 this._logJNI('CallMethod→String', 'getSharedPreference("' + key + '") → "' + value + '"');
