@@ -1264,6 +1264,107 @@ const AndroidShims = {
                 return 0;
             },
             'fwrite':  function(emu, args) { return args[2]; }, // pretend success
+            // v28d: fgetc — critical for BGrm parsing! Game reads byte-by-byte after magic
+            'fgetc':   function(emu, args) {
+                var filePtr = args[0];
+                var fd = (self._filePtrToFd && self._filePtrToFd.has(filePtr)) ? self._filePtrToFd.get(filePtr) : filePtr;
+                if (self.vfs && fd >= 100) {
+                    var handle = self.vfs._handles.get(fd);
+                    if (handle && handle.pos < handle.size) {
+                        var byte = handle.data[handle.pos];
+                        handle.pos++;
+                        // Sync FILE struct
+                        self._syncFileStruct(emu, filePtr, fd);
+                        return byte;
+                    }
+                    return -1; // EOF
+                }
+                return -1; // EOF
+            },
+            'getc':    function(emu, args) {
+                return self.engine.shims['fgetc'](emu, args);
+            },
+            'getc_unlocked': function(emu, args) {
+                return self.engine.shims['fgetc'](emu, args);
+            },
+            'ungetc':  function(emu, args) {
+                // ungetc(c, stream) — push byte back
+                var c = args[0];
+                var filePtr = args[1];
+                var fd = (self._filePtrToFd && self._filePtrToFd.has(filePtr)) ? self._filePtrToFd.get(filePtr) : filePtr;
+                if (self.vfs && fd >= 100) {
+                    var handle = self.vfs._handles.get(fd);
+                    if (handle && handle.pos > 0) {
+                        handle.pos--;
+                        self._syncFileStruct(emu, filePtr, fd);
+                    }
+                }
+                return c;
+            },
+            'fputc':   function(emu, args) { return args[0] & 0xFF; },
+            'fputs':   function(emu, args) { return 0; },
+            'fprintf': function(emu, args) { return 0; },
+            'vfprintf': function(emu, args) { return 0; },
+            'fdopen':  function(emu, args) {
+                // fdopen(fd, mode) — convert POSIX fd to FILE*
+                var fd = args[0];
+                var mode = self._readCString(emu, args[1]);
+                Logger.info('[fdopen] fd=' + fd + ' mode=' + mode);
+                if (self.vfs && fd >= 100) {
+                    var handle = self.vfs._handles.get(fd);
+                    if (handle) {
+                        var fileSize = handle.size;
+                        var bufPtr = self.malloc(fileSize);
+                        if (bufPtr && fileSize > 0) {
+                            try {
+                                emu.mem_write(bufPtr, Array.from(handle.data));
+                            } catch(e) { self.free(bufPtr); bufPtr = 0; }
+                        }
+                        var filePtr = self.malloc(80);
+                        if (filePtr) {
+                            var fs = new Array(80).fill(0);
+                            var p = bufPtr || 0;
+                            fs[0] = p & 0xFF; fs[1] = (p >> 8) & 0xFF;
+                            fs[2] = (p >> 16) & 0xFF; fs[3] = (p >> 24) & 0xFF;
+                            fs[4] = fileSize & 0xFF; fs[5] = (fileSize >> 8) & 0xFF;
+                            fs[6] = (fileSize >> 16) & 0xFF; fs[7] = (fileSize >> 24) & 0xFF;
+                            fs[12] = 0x04; fs[13] = 0x00;
+                            fs[14] = fd & 0xFF; fs[15] = (fd >> 8) & 0xFF;
+                            fs[16] = p & 0xFF; fs[17] = (p >> 8) & 0xFF;
+                            fs[18] = (p >> 16) & 0xFF; fs[19] = (p >> 24) & 0xFF;
+                            fs[20] = fileSize & 0xFF; fs[21] = (fileSize >> 8) & 0xFF;
+                            fs[22] = (fileSize >> 16) & 0xFF; fs[23] = (fileSize >> 24) & 0xFF;
+                            try { emu.mem_write(filePtr, fs); } catch(e) {}
+                            self._filePtrToFd.set(filePtr, fd);
+                            if (!self._filePtrBufs) self._filePtrBufs = new Map();
+                            if (bufPtr) self._filePtrBufs.set(filePtr, bufPtr);
+                            return filePtr;
+                        }
+                    }
+                }
+                return 0;
+            },
+            'fseeko':  function(emu, args) {
+                return self.engine.shims['fseek'](emu, args);
+            },
+            'ftello':  function(emu, args) {
+                return self.engine.shims['ftell'](emu, args);
+            },
+            'lseek64': function(emu, args) {
+                // lseek64(fd, offset_lo, offset_hi, result_ptr, whence)
+                // For simplicity treat as lseek with 32-bit offset
+                var fd = args[0];
+                var offset = args[1] | 0;
+                var whence = args[3]; // arg[2]=offset_hi, arg[3]=whence
+                if (self.vfs && fd >= 100) {
+                    self.vfs.fseek(fd, offset, whence);
+                    return self.vfs.ftell(fd);
+                }
+                return -1;
+            },
+            '__open_2': function(emu, args) {
+                return self.engine.shims['open'](emu, args);
+            },
             'fgets':   function(emu, args) {
                 var destPtr = args[0];
                 var maxLen = args[1];
@@ -1747,6 +1848,27 @@ const AndroidShims = {
             },
             'munmap':    function(emu, args) { return 0; },
             'mprotect':  function(emu, args) { return 0; },
+            // v28d: fts (file tree walk) — used by game for directory scanning
+            'fts_open':  function(emu, args) { return 0; }, // NULL = error (no dirs to walk)
+            'fts_read':  function(emu, args) { return 0; }, // NULL = end of tree
+            'fts_close': function(emu, args) { return 0; },
+            // v28d: asprintf — allocate and format string
+            'asprintf':  function(emu, args) {
+                var destPtrPtr = args[0];
+                var fmt = self._readCString(emu, args[1]);
+                if (!fmt) return -1;
+                var result = self._formatString(emu, fmt, function(idx) {
+                    return self._readU32(emu, args[2 + idx]);
+                });
+                var ptr = self.malloc(result.length + 1);
+                if (ptr) {
+                    self._writeStringToMem(emu, ptr, result, result.length + 1);
+                    if (destPtrPtr) {
+                        emu.mem_write(destPtrPtr, [ptr & 0xFF, (ptr >> 8) & 0xFF, (ptr >> 16) & 0xFF, (ptr >> 24) & 0xFF]);
+                    }
+                }
+                return result.length;
+            },
 
             // ============================================
             // Android logging (read actual tag + message)
