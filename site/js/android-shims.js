@@ -1487,7 +1487,39 @@ const AndroidShims = {
             '__cxa_guard_acquire': function(emu, args) { return 1; },
             '__cxa_guard_release': function(emu, args) { return 0; },
             '__cxa_guard_abort':   function(emu, args) { return 0; },
-            'mmap':      function(emu, args) { return self.malloc(args[1] || 4096); },
+            'mmap':      function(emu, args) {
+                // args: [addr, length, prot, flags, fd, offset]
+                var addr = args[0], length = args[1] || 4096, prot = args[2];
+                var flags = args[3];
+                // fd and offset are on stack for mmap (6 args)
+                var stackArgs = self._readStackArgs(emu, 2);
+                var fd = stackArgs[0], offset = stackArgs[1] || 0;
+
+                var ptr = self.malloc(length);
+                Logger.info('[mmap] addr=0x' + (addr>>>0).toString(16) + ' len=' + length +
+                    ' fd=' + fd + ' offset=' + offset + ' → 0x' + (ptr>>>0).toString(16));
+
+                // v27f: If fd is a VFS file, copy its data into the mmap'd region
+                if (self.vfs && fd >= 100) {
+                    var handle = self.vfs._handles.get(fd);
+                    if (handle && handle.data) {
+                        var start = offset;
+                        var end = Math.min(start + length, handle.data.length);
+                        var toWrite = end - start;
+                        if (toWrite > 0) {
+                            try {
+                                var chunk = Array.from(handle.data.slice(start, end));
+                                emu.mem_write(ptr, chunk);
+                                Logger.info('[mmap] Wrote ' + toWrite + ' bytes from VFS fd=' + fd +
+                                    ' (file: ' + handle.path + ')');
+                            } catch(e) {
+                                Logger.warn('[mmap] Failed to write VFS data: ' + e.message);
+                            }
+                        }
+                    }
+                }
+                return ptr;
+            },
             'munmap':    function(emu, args) { return 0; },
             'mprotect':  function(emu, args) { return 0; },
 
@@ -2427,7 +2459,14 @@ const AndroidShims = {
                 }
                 // VFS file read
                 if (self.vfs && fd >= 100) {
-                    return self.vfs.fread(fd, bufPtr, 1, len, emu) * 1;
+                    var result = self.vfs.fread(fd, bufPtr, 1, len, emu);
+                    // v27e: Log POSIX read() on VFS files
+                    if (self._posixReadLogCount === undefined) self._posixReadLogCount = 0;
+                    if (self._posixReadLogCount < 50) {
+                        self._posixReadLogCount++;
+                        Logger.info('[read] fd=' + fd + ' len=' + len + ' → ' + result + ' bytes');
+                    }
+                    return result;
                 }
                 return 0;
             },
