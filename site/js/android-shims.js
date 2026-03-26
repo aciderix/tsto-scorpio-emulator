@@ -187,6 +187,35 @@ const AndroidShims = {
         Logger.info('[NET] HTTP Response: ' + status + ' ' + statusText + ' (' + respBody.length + ' bytes body)');
     },
 
+    // v28b: Sync bionic FILE struct buffer pointers with VFS position
+    // After fread/fseek, update _p and _r so ARM getc() macro works correctly
+    _syncFileStruct(emu, filePtr, fd) {
+        if (!this._filePtrToFd || !this._filePtrToFd.has(filePtr)) return;
+        if (!this._filePtrBufs || !this._filePtrBufs.has(filePtr)) return;
+        if (!this.vfs) return;
+
+        var handle = this.vfs._handles.get(fd);
+        if (!handle) return;
+
+        var bufBase = this._filePtrBufs.get(filePtr);
+        var pos = handle.pos;
+        var remaining = handle.size - pos;
+
+        // _p at offset 0: bufBase + pos
+        var newP = (bufBase + pos) >>> 0;
+        try {
+            emu.mem_write(filePtr, [
+                newP & 0xFF, (newP >> 8) & 0xFF,
+                (newP >> 16) & 0xFF, (newP >> 24) & 0xFF
+            ]);
+            // _r at offset 4: remaining bytes
+            emu.mem_write(filePtr + 4, [
+                remaining & 0xFF, (remaining >> 8) & 0xFF,
+                (remaining >> 16) & 0xFF, (remaining >> 24) & 0xFF
+            ]);
+        } catch(e) {}
+    },
+
     malloc(size) {
         if (!size || size <= 0) return 0;
         var aligned = (size + 7) & ~7;
@@ -1071,31 +1100,86 @@ const AndroidShims = {
                 if (self.vfs) {
                     var fd = self.vfs.fopen(path, mode);
                     if (fd) {
-                        // v28: Return a heap-allocated FILE struct pointer instead of raw fd
-                        // ARM code may dereference FILE* to read internal fields
-                        // Bionic FILE struct: _flags(4), _IO_read_ptr(4), _IO_read_end(4),
-                        //   _IO_read_base(4), ... _fileno at offset 12-16 (varies by impl)
-                        // We allocate 80 bytes and store the fd at multiple offsets
+                        // v28b: Return heap-allocated FILE struct with full bionic layout
+                        // ARM code reads directly from FILE struct buffer pointers (getc macro)
+                        // Bionic __sFILE layout:
+                        //   0:  unsigned char *_p     — current position in buffer
+                        //   4:  int _r                — read space left for getc()
+                        //   8:  int _w                — write space left for putc()
+                        //  12:  short _flags           — flags
+                        //  14:  short _file            — file descriptor number
+                        //  16:  struct __sbuf { char *_base; int _size; } _bf
+                        //  24:  int _lbfsize
+                        //  28:  void *_cookie
+                        //  32:  int (*_close)(void *)
+                        //  36:  int (*_read)(void *, char *, int)
+                        //  40:  fpos_t (*_seek)(void *, fpos_t, int)
+                        //  44:  int (*_write)(void *, const char *, int)
+                        //  48+: extension fields
+
+                        var handle = self.vfs._handles.get(fd);
+                        var fileSize = handle ? handle.size : 0;
+
+                        // Allocate buffer for entire file contents in emulator memory
+                        var bufPtr = 0;
+                        if (handle && handle.data && fileSize > 0) {
+                            bufPtr = self.malloc(fileSize);
+                            if (bufPtr) {
+                                try {
+                                    // Copy file data into emulator memory
+                                    var chunk = Array.from(handle.data);
+                                    emu.mem_write(bufPtr, chunk);
+                                    Logger.info('[fopen] Loaded ' + fileSize + ' bytes into buffer at 0x' + bufPtr.toString(16));
+                                } catch(e) {
+                                    Logger.warn('[fopen] Failed to load file buffer: ' + e.message);
+                                    self.free(bufPtr);
+                                    bufPtr = 0;
+                                }
+                            }
+                        }
+
+                        // Allocate FILE struct (80 bytes)
                         var filePtr = self.malloc(80);
                         if (filePtr) {
                             try {
-                                var fileStruct = new Array(80).fill(0);
-                                // _flags at offset 0: readable flag (0x0001 = _IO_MAGIC | readable)
-                                fileStruct[0] = 0x01; fileStruct[1] = 0xFB; fileStruct[2] = 0xAD; fileStruct[3] = 0xFB;
-                                // Store fd at offset 12 (bionic _file field) and offset 14 (some impls)
-                                fileStruct[12] = fd & 0xFF; fileStruct[13] = (fd >> 8) & 0xFF;
-                                fileStruct[14] = fd & 0xFF; fileStruct[15] = (fd >> 8) & 0xFF;
-                                // Also at offset 16 and 56 for other FILE struct layouts
-                                fileStruct[16] = fd & 0xFF; fileStruct[17] = (fd >> 8) & 0xFF;
-                                fileStruct[56] = fd & 0xFF; fileStruct[57] = (fd >> 8) & 0xFF;
-                                emu.mem_write(filePtr, fileStruct);
+                                var fs = new Array(80).fill(0);
+
+                                // _p at offset 0: pointer to current read position
+                                var p = bufPtr || 0;
+                                fs[0] = p & 0xFF; fs[1] = (p >> 8) & 0xFF;
+                                fs[2] = (p >> 16) & 0xFF; fs[3] = (p >> 24) & 0xFF;
+
+                                // _r at offset 4: bytes remaining to read
+                                fs[4] = fileSize & 0xFF; fs[5] = (fileSize >> 8) & 0xFF;
+                                fs[6] = (fileSize >> 16) & 0xFF; fs[7] = (fileSize >> 24) & 0xFF;
+
+                                // _w at offset 8: 0 (not writable)
+
+                                // _flags at offset 12: __SRD (read) = 0x0004
+                                fs[12] = 0x04; fs[13] = 0x00;
+
+                                // _file at offset 14: file descriptor
+                                fs[14] = fd & 0xFF; fs[15] = (fd >> 8) & 0xFF;
+
+                                // _bf._base at offset 16: base of buffer
+                                fs[16] = p & 0xFF; fs[17] = (p >> 8) & 0xFF;
+                                fs[18] = (p >> 16) & 0xFF; fs[19] = (p >> 24) & 0xFF;
+
+                                // _bf._size at offset 20: buffer size
+                                fs[20] = fileSize & 0xFF; fs[21] = (fileSize >> 8) & 0xFF;
+                                fs[22] = (fileSize >> 16) & 0xFF; fs[23] = (fileSize >> 24) & 0xFF;
+
+                                emu.mem_write(filePtr, fs);
                             } catch(e) {
                                 Logger.warn('[fopen] Failed to write FILE struct: ' + e.message);
                             }
-                            // Map FILE* pointer back to fd for fread/fclose etc.
-                            if (!self._filePtrToFd) self._filePtrToFd = new Map();
+
+                            // Map FILE* back to fd and track buffer for cleanup
                             self._filePtrToFd.set(filePtr, fd);
-                            Logger.info('[fopen] HIT: ' + path + ' -> fd=' + fd + ' FILE*=0x' + filePtr.toString(16));
+                            if (!self._filePtrBufs) self._filePtrBufs = new Map();
+                            if (bufPtr) self._filePtrBufs.set(filePtr, bufPtr);
+
+                            Logger.info('[fopen] HIT: ' + path + ' -> fd=' + fd + ' FILE*=0x' + filePtr.toString(16) + ' buf=0x' + (bufPtr||0).toString(16) + ' size=' + fileSize);
                             return filePtr;
                         }
                         // Fallback: return fd directly
@@ -1110,11 +1194,16 @@ const AndroidShims = {
             },
             'fclose':  function(emu, args) {
                 var filePtr = args[0];
-                // v28: Resolve FILE* to fd
+                // v28: Resolve FILE* to fd and free resources
                 var fd = filePtr;
                 if (self._filePtrToFd && self._filePtrToFd.has(filePtr)) {
                     fd = self._filePtrToFd.get(filePtr);
                     self._filePtrToFd.delete(filePtr);
+                    // Free the file data buffer
+                    if (self._filePtrBufs && self._filePtrBufs.has(filePtr)) {
+                        self.free(self._filePtrBufs.get(filePtr));
+                        self._filePtrBufs.delete(filePtr);
+                    }
                     self.free(filePtr); // free the FILE struct
                 }
                 if (self.vfs && fd >= 100) {
@@ -1133,8 +1222,11 @@ const AndroidShims = {
                 if (self.vfs && fd >= 100) {
                     var posBefore = self.vfs.ftell(fd);
                     var result = self.vfs.fread(fd, destPtr, itemSize, itemCount, emu);
-                    // v28: Extended logging — log ALL fread calls with data preview
-                    if (self._freadLogCount === undefined) self._freadLogCount = 0;
+
+                    // v28b: Sync FILE struct buffer pointers after read
+                    self._syncFileStruct(emu, filePtr, fd);
+
+                    // Log fread calls with data preview
                     if (self._freadLogCount < 200) {
                         self._freadLogCount++;
                         var totalBytes = itemSize * result;
@@ -1176,6 +1268,8 @@ const AndroidShims = {
 
                 if (self.vfs && fd >= 100) {
                     var result = self.vfs.fseek(fd, offset, whence);
+                    // v28b: Sync FILE struct buffer pointers after seek
+                    self._syncFileStruct(emu, filePtr, fd);
                     var whenceStr = whence === 0 ? 'SET' : whence === 1 ? 'CUR' : 'END';
                     Logger.info('[fseek] fd=' + fd + ' offset=' + offset + ' whence=' + whenceStr + ' -> pos=' + self.vfs.ftell(fd));
                     return result;
