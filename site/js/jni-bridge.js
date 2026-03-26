@@ -68,6 +68,7 @@ class JNIBridge {
             'CustomConfigBasicAuth': '',
             'ServerErrorReason': '',
             'DLCSecretKey': 'tapped_out_secret_key_2013',
+            'language': 'en',
         };
 
         // Logging
@@ -358,6 +359,17 @@ class JNIBridge {
                 var method = self._methodRegistry.get(methodId);
                 var name = method ? method.name : '?';
                 self._logJNI('CallStaticVoidMethodV', name + ' class=0x' + (args[1]>>>0).toString(16));
+                // Intercept closeApp — game wants to quit but we keep running
+                if (name === 'closeApp') {
+                    Logger.warn('[JNI] closeApp intercepted — game wants to quit, ignoring');
+                }
+                // Intercept showDialog — log the dialog text
+                if (name === 'showDialog') {
+                    // args[3..5] are jstring pointers for title, message, button
+                    var title = self._strings.get(args[3]) || '?';
+                    var msg = self._strings.get(args[4]) || '?';
+                    Logger.warn('[JNI] showDialog: title="' + title + '" msg="' + msg + '"');
+                }
                 return 0;
             } },
             143: { name: 'CallStaticVoidMethodA', handler: function(emu, args) { return 0; } },
@@ -904,6 +916,16 @@ class JNIBridge {
         var name = method ? method.name : '?';
         var nameLower = name.toLowerCase();
 
+        // First run — return false (not first run, game is already "installed")
+        if (nameLower.indexOf('isfirstrun') >= 0 || nameLower === 'firstrun') {
+            this._logJNI('CallBooleanMethod', name + ' → 0 (not first run)');
+            return 0;
+        }
+        // Language changed — return false (no change)
+        if (nameLower.indexOf('haslanguagechanged') >= 0 || nameLower.indexOf('sethaslanguagechanged') >= 0) {
+            this._logJNI('CallBooleanMethod', name + ' → 0 (no language change)');
+            return 0;
+        }
         // Network connectivity — always return true (connected)
         if (nameLower.indexOf('isconnected') >= 0 || nameLower.indexOf('isnetwork') >= 0 ||
             nameLower.indexOf('isonline') >= 0 || nameLower.indexOf('isavailable') >= 0 ||
@@ -923,6 +945,11 @@ class JNIBridge {
             nameLower.indexOf('isfinished') >= 0 || nameLower.indexOf('isloaded') >= 0 ||
             nameLower.indexOf('isdone') >= 0) {
             this._logJNI('CallBooleanMethod', name + ' → 1 (ready)');
+            return 1;
+        }
+        // mkdir — return true (directory created)
+        if (nameLower === 'mkdir' || nameLower === 'mkdirs') {
+            this._logJNI('CallBooleanMethod', name + ' → 1 (mkdir ok)');
             return 1;
         }
         // Default: return 1 (true) — most boolean checks are "is X available/enabled"
