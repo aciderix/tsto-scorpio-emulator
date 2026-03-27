@@ -219,40 +219,23 @@ class ScorpioEngine {
             0x1E, 0xFF, 0x2F, 0xE1,  // BX LR
         ]);
 
-        // v29e: FILE struct function pointer stubs
+        // v30: FILE struct function pointer stubs as SHIM handlers
         // Bionic's internal fwrite/fflush/fgetc call _read/_write/_close/_seek via
-        // function pointers in the FILE struct. If these are NULL, bionic calls 0x0,
-        // our BX LR stub returns 0, and bionic retries infinitely.
-        // Fix: provide proper stubs at known SHIM addresses.
+        // function pointers in the FILE struct. These are registered as shim handlers
+        // so our JavaScript code can handle them properly with VFS access.
         this.FILE_READ_STUB  = this.SHIM_BASE + 0xFD000;  // 0xE00FD000
         this.FILE_WRITE_STUB = this.SHIM_BASE + 0xFD010;  // 0xE00FD010
         this.FILE_CLOSE_STUB = this.SHIM_BASE + 0xFD020;  // 0xE00FD020
         this.FILE_SEEK_STUB  = this.SHIM_BASE + 0xFD030;  // 0xE00FD030
 
-        // _read(cookie, buf, count) → return -1 (EOF, no data)
-        // MVN R0, #0 = 0xE3E00000; BX LR = 0xE12FFF1E
-        this.emu.mem_write(this.FILE_READ_STUB, [
-            0x00, 0x00, 0xE0, 0xE3,  // MVN R0, #0 (R0 = -1)
-            0x1E, 0xFF, 0x2F, 0xE1,  // BX LR
-        ]);
-        // _write(cookie, buf, count) → return count (R2) = pretend all bytes written
-        // MOV R0, R2 = 0xE1A00002; BX LR = 0xE12FFF1E
-        this.emu.mem_write(this.FILE_WRITE_STUB, [
-            0x02, 0x00, 0xA0, 0xE1,  // MOV R0, R2
-            0x1E, 0xFF, 0x2F, 0xE1,  // BX LR
-        ]);
-        // _close(cookie) → return 0 (success)
-        this.emu.mem_write(this.FILE_CLOSE_STUB, [
-            0x00, 0x00, 0xA0, 0xE3,  // MOV R0, #0
-            0x1E, 0xFF, 0x2F, 0xE1,  // BX LR
-        ]);
-        // _seek(cookie, pos, whence) → return 0
-        this.emu.mem_write(this.FILE_SEEK_STUB, [
-            0x00, 0x00, 0xA0, 0xE3,  // MOV R0, #0
-            0x1E, 0xFF, 0x2F, 0xE1,  // BX LR
-        ]);
-        Logger.info('[v29e] FILE struct function stubs written at 0x' +
-            this.FILE_READ_STUB.toString(16) + '-0x' + (this.FILE_SEEK_STUB + 8).toString(16));
+        // Write BX LR at each stub address (the shim handler does the real work)
+        var bxlr = [0x1E, 0xFF, 0x2F, 0xE1];
+        this.emu.mem_write(this.FILE_READ_STUB, bxlr);
+        this.emu.mem_write(this.FILE_WRITE_STUB, bxlr);
+        this.emu.mem_write(this.FILE_CLOSE_STUB, bxlr);
+        this.emu.mem_write(this.FILE_SEEK_STUB, bxlr);
+        Logger.info('[v30] FILE struct function stubs at 0x' +
+            this.FILE_READ_STUB.toString(16) + '-0x' + (this.FILE_SEEK_STUB + 4).toString(16));
 
         // Setup JNI environment (maps string heap + writes JNI structures)
         this.jni.setup(this.emu);
@@ -417,6 +400,70 @@ class ScorpioEngine {
             vmCount++;
         }
         Logger.info('  ' + vmCount + ' JavaVM vtable handlers registered');
+
+        // === v30: Register FILE struct callback handlers ===
+        // These handle bionic's internal _read/_write/_close/_seek calls on FILE*
+        // _read(cookie, buf, count) - cookie=fd, buf=dest, count=bytes to read
+        this.shimHandlers.set(this.FILE_READ_STUB, { name: 'FILE._read', handler: function(emu, args) {
+            var cookie = args[0]; // fd number stored in FILE._cookie
+            var buf = args[1];
+            var count = args[2];
+            if (!self.vfs || cookie < 100) return 0;
+            var handle = self.vfs._handles ? self.vfs._handles.get(cookie) : null;
+            if (!handle) return 0;
+            var avail = handle.size - handle.pos;
+            var toRead = Math.min(count, avail);
+            if (toRead <= 0) return 0; // EOF
+            try {
+                var data = Array.from(handle.data.slice(handle.pos, handle.pos + toRead));
+                emu.mem_write(buf, data);
+                handle.pos += toRead;
+                if (self._fileReadLogCount === undefined) self._fileReadLogCount = 0;
+                self._fileReadLogCount++;
+                if (self._fileReadLogCount <= 30) {
+                    Logger.info('[FILE._read] fd=' + cookie + ' count=' + count + ' read=' + toRead + ' pos=' + handle.pos + '/' + handle.size);
+                }
+            } catch(e) { return 0; }
+            return toRead;
+        }});
+        // _write(cookie, buf, count) - pretend success
+        this.shimHandlers.set(this.FILE_WRITE_STUB, { name: 'FILE._write', handler: function(emu, args) {
+            return args[2]; // return count
+        }});
+        // _close(cookie) - cleanup
+        this.shimHandlers.set(this.FILE_CLOSE_STUB, { name: 'FILE._close', handler: function(emu, args) {
+            var cookie = args[0];
+            if (self._fileCloseLogCount === undefined) self._fileCloseLogCount = 0;
+            self._fileCloseLogCount++;
+            if (self._fileCloseLogCount <= 10) {
+                Logger.info('[FILE._close] fd=' + cookie);
+            }
+            return 0;
+        }});
+        // _seek(cookie, offset, whence) - bionic _seek: returns new position or -1
+        this.shimHandlers.set(this.FILE_SEEK_STUB, { name: 'FILE._seek', handler: function(emu, args) {
+            var cookie = args[0];
+            var offset = args[1] | 0; // signed
+            var whence = args[2];
+            if (!self.vfs || cookie < 100) return -1;
+            var handle = self.vfs._handles ? self.vfs._handles.get(cookie) : null;
+            if (!handle) return -1;
+            var newPos;
+            if (whence === 0) newPos = offset; // SEEK_SET
+            else if (whence === 1) newPos = handle.pos + offset; // SEEK_CUR
+            else if (whence === 2) newPos = handle.size + offset; // SEEK_END
+            else return -1;
+            if (newPos < 0) newPos = 0;
+            if (newPos > handle.size) newPos = handle.size;
+            handle.pos = newPos;
+            if (self._fileSeekLogCount === undefined) self._fileSeekLogCount = 0;
+            self._fileSeekLogCount++;
+            if (self._fileSeekLogCount <= 30) {
+                Logger.info('[FILE._seek] fd=' + cookie + ' offset=' + offset + ' whence=' + whence + ' -> pos=' + newPos);
+            }
+            return newPos;
+        }});
+        Logger.info('  4 FILE struct callback handlers registered');
 
         Logger.info('  Total shim handlers: ' + this.shimHandlers.size);
     }

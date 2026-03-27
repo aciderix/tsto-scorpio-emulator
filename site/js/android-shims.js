@@ -230,6 +230,14 @@ const AndroidShims = {
                 remaining & 0xFF, (remaining >> 8) & 0xFF,
                 (remaining >> 16) & 0xFF, (remaining >> 24) & 0xFF
             ]);
+            // v30: Clear __SEOF (0x0020) and __SERR (0x0040) flags at offset 12
+            // When bionic's internal reads exhaust the buffer and _read returns 0/EOF,
+            // bionic sets __SEOF. If _read returned -1 (our old bug), __SERR is set.
+            // These flags prevent subsequent reads/seeks from working. Clear them on sync.
+            var flagsBytes = emu.mem_read(filePtr + 12, 2);
+            var flags = flagsBytes[0] | (flagsBytes[1] << 8);
+            flags &= ~(0x0020 | 0x0040);  // clear __SEOF and __SERR
+            emu.mem_write(filePtr + 12, [flags & 0xFF, (flags >> 8) & 0xFF]);
         } catch(e) {}
     },
 
