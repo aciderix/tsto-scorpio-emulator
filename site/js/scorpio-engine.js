@@ -1038,11 +1038,12 @@ class ScorpioEngine {
 
         // === v18: Pre-allocate BGCore object for OGLESInit ===
         // OGLESInit reads ScorpioSingleton (VA 0x1A45728) → +0x1AC → BGCore object
-        // ScorpioJNI.init just created the singleton, but field +0x1AC (BGCore) is NULL
-        // We allocate a fake BGCore with a vtable pointing to GENERIC_RETURN
+        // If ScorpioJNI.init properly initialized, field +0x1AC may already be set.
+        // v30: Only pre-allocate if the field is still NULL.
         var SINGLETON_PTR_ADDR = this.BASE + 0x1A45728;
         var singletonPtr = this._readU32FromEmu(SINGLETON_PTR_ADDR);
-        if (singletonPtr && singletonPtr !== 0) {
+        var existingBGCore = singletonPtr ? this._readU32FromEmu(singletonPtr + 0x1AC) : 0;
+        if (singletonPtr && singletonPtr !== 0 && (!existingBGCore || existingBGCore === 0)) {
             // Allocate fake BGCore object (0x200 bytes)
             var bgCoreSize = 0x200;
             var bgCorePtr = AndroidShims.malloc(bgCoreSize);
@@ -1065,6 +1066,8 @@ class ScorpioEngine {
             this._writeU32ToEmu(singletonPtr + 0x1AC, bgCorePtr);
             Logger.success('v18: Pre-allocated BGCore object at 0x' + bgCorePtr.toString(16) +
                 ' (vtable at 0x' + vtablePtr.toString(16) + ') → singleton+0x1AC');
+        } else if (existingBGCore && existingBGCore !== 0) {
+            Logger.success('v30: BGCore already initialized at 0x' + existingBGCore.toString(16) + ' — skipping pre-allocation');
         } else {
             Logger.warn('v18: Scorpio singleton still NULL after ScorpioJNI.init — BGCore NOT pre-allocated');
         }
