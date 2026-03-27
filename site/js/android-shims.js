@@ -1137,28 +1137,39 @@ const AndroidShims = {
                         var handle = self.vfs._handles.get(fd);
                         var fileSize = handle ? handle.size : 0;
 
-                        // Allocate buffer for entire file contents in emulator memory
+                        // v29c: Detect write mode — needs a valid write buffer even for empty files
+                        var isWriteMode = mode && (mode.indexOf('w') >= 0 || mode.indexOf('a') >= 0 || mode.indexOf('+') >= 0);
+
+                        // Allocate buffer for file contents in emulator memory
+                        // For write modes, allocate a 4KB write buffer even if file is empty
                         var bufPtr = 0;
-                        if (handle && handle.data && fileSize > 0) {
-                            bufPtr = self.malloc(fileSize);
+                        var bufSize = fileSize;
+                        if (isWriteMode && bufSize < 4096) {
+                            bufSize = 4096; // minimum write buffer
+                        }
+                        if (bufSize > 0) {
+                            bufPtr = self.malloc(bufSize);
                             if (bufPtr) {
                                 try {
-                                    // Copy file data into emulator memory
-                                    var chunk = Array.from(handle.data);
-                                    emu.mem_write(bufPtr, chunk);
-                                    // v28c: Verify buffer was written correctly
-                                    var verifyLen = Math.min(32, fileSize);
-                                    var verify = emu.mem_read(bufPtr, verifyLen);
-                                    var match = true;
-                                    for (var vi = 0; vi < verifyLen; vi++) {
-                                        if (verify[vi] !== handle.data[vi]) { match = false; break; }
+                                    if (handle && handle.data && fileSize > 0) {
+                                        // Copy file data into emulator memory
+                                        var chunk = Array.from(handle.data);
+                                        emu.mem_write(bufPtr, chunk);
+                                        // v28c: Verify buffer was written correctly
+                                        var verifyLen = Math.min(32, fileSize);
+                                        var verify = emu.mem_read(bufPtr, verifyLen);
+                                        var match = true;
+                                        for (var vi = 0; vi < verifyLen; vi++) {
+                                            if (verify[vi] !== handle.data[vi]) { match = false; break; }
+                                        }
+                                        var hexPreview = Array.from(verify).slice(0, 16).map(function(b) { return b.toString(16).padStart(2, '0'); }).join(' ');
+                                        Logger.info('[fopen] Loaded ' + fileSize + ' bytes into buffer at 0x' + bufPtr.toString(16) + ' verify=' + (match ? 'OK' : 'MISMATCH') + ' [' + hexPreview + ']');
                                     }
-                                    var hexPreview = Array.from(verify).slice(0, 16).map(function(b) { return b.toString(16).padStart(2, '0'); }).join(' ');
-                                    Logger.info('[fopen] Loaded ' + fileSize + ' bytes into buffer at 0x' + bufPtr.toString(16) + ' verify=' + (match ? 'OK' : 'MISMATCH') + ' [' + hexPreview + ']');
                                 } catch(e) {
                                     Logger.warn('[fopen] Failed to load file buffer: ' + e.message);
                                     self.free(bufPtr);
                                     bufPtr = 0;
+                                    bufSize = 0;
                                 }
                             }
                         }
@@ -1169,7 +1180,7 @@ const AndroidShims = {
                             try {
                                 var fs = new Array(80).fill(0);
 
-                                // _p at offset 0: pointer to current read position
+                                // _p at offset 0: pointer to current position in buffer
                                 var p = bufPtr || 0;
                                 fs[0] = p & 0xFF; fs[1] = (p >> 8) & 0xFF;
                                 fs[2] = (p >> 16) & 0xFF; fs[3] = (p >> 24) & 0xFF;
@@ -1178,10 +1189,16 @@ const AndroidShims = {
                                 fs[4] = fileSize & 0xFF; fs[5] = (fileSize >> 8) & 0xFF;
                                 fs[6] = (fileSize >> 16) & 0xFF; fs[7] = (fileSize >> 24) & 0xFF;
 
-                                // _w at offset 8: 0 (not writable)
+                                // _w at offset 8: write space left
+                                // v29c: For write modes, set write space = buffer capacity - current data
+                                var writeSpace = isWriteMode ? (bufSize - fileSize) : 0;
+                                fs[8] = writeSpace & 0xFF; fs[9] = (writeSpace >> 8) & 0xFF;
+                                fs[10] = (writeSpace >> 16) & 0xFF; fs[11] = (writeSpace >> 24) & 0xFF;
 
-                                // _flags at offset 12: __SRD (read) = 0x0004
-                                fs[12] = 0x04; fs[13] = 0x00;
+                                // _flags at offset 12: __SRD=0x0004 (read), __SWR=0x0008 (write), __SRW=0x0010 (r+w)
+                                var flags = isWriteMode ? 0x0008 : 0x0004;
+                                if (mode && mode.indexOf('+') >= 0) flags = 0x0010;
+                                fs[12] = flags & 0xFF; fs[13] = (flags >> 8) & 0xFF;
 
                                 // _file at offset 14: file descriptor
                                 fs[14] = fd & 0xFF; fs[15] = (fd >> 8) & 0xFF;
@@ -1190,9 +1207,9 @@ const AndroidShims = {
                                 fs[16] = p & 0xFF; fs[17] = (p >> 8) & 0xFF;
                                 fs[18] = (p >> 16) & 0xFF; fs[19] = (p >> 24) & 0xFF;
 
-                                // _bf._size at offset 20: buffer size
-                                fs[20] = fileSize & 0xFF; fs[21] = (fileSize >> 8) & 0xFF;
-                                fs[22] = (fileSize >> 16) & 0xFF; fs[23] = (fileSize >> 24) & 0xFF;
+                                // _bf._size at offset 20: total buffer capacity
+                                fs[20] = bufSize & 0xFF; fs[21] = (bufSize >> 8) & 0xFF;
+                                fs[22] = (bufSize >> 16) & 0xFF; fs[23] = (bufSize >> 24) & 0xFF;
 
                                 emu.mem_write(filePtr, fs);
                                 // v28c: Verify FILE struct was written correctly

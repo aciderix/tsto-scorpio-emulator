@@ -693,18 +693,30 @@ class ScorpioEngine {
                         ' — auto-return to LR=0x' + lrUnsigned.toString(16) +
                         ' R0=0x' + (r0>>>0).toString(16));
                 }
-                // Map the page so Unicorn doesn't fault, write a BX LR there
-                // v29: Use 1MB blocks to reduce section table fragmentation
+                // Map the page so Unicorn doesn't fault, fill entirely with BX LR
+                // v29c: Fill entire block with "MOV R0,#0; BX LR" to prevent zero-NOP spin.
+                // Previously only wrote stub at target addr — rest was zeros (ANDEQ = NOP),
+                // causing ScorpioJNI_init to burn 100M instructions sliding through zeros.
                 var CODE_BLOCK = 0x100000;
                 var aligned = addr & ~(CODE_BLOCK - 1);
                 if (!this._autoMapped.has(aligned)) {
                     try {
                         this.emu.mem_map(aligned, CODE_BLOCK, uc.PROT_ALL);
                         this._autoMapped.add(aligned);
+                        // Fill with MOV R0,#0; BX LR every 8 bytes
+                        var stub = [0x00, 0x00, 0xA0, 0xE3, 0x1E, 0xFF, 0x2F, 0xE1];
+                        var fill = [];
+                        // Fill 4KB at a time (512 stubs)
+                        for (var si = 0; si < 512; si++) {
+                            for (var sj = 0; sj < 8; sj++) fill.push(stub[sj]);
+                        }
+                        // Write 4KB chunks across the 1MB block
+                        for (var off = 0; off < CODE_BLOCK; off += 4096) {
+                            this.emu.mem_write(aligned + off, fill);
+                        }
                     } catch(e) {}
                 }
-                // Write "MOV R0, #0; BX LR" at the target address
-                // MOV R0, #0 = 0xE3A00000, BX LR = 0xE12FFF1E
+                // Also write at the exact target address (redundant but safe)
                 try {
                     this.emu.mem_write(addr, [0x00, 0x00, 0xA0, 0xE3, 0x1E, 0xFF, 0x2F, 0xE1]);
                 } catch(e) {}
