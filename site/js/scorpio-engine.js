@@ -732,8 +732,6 @@ class ScorpioEngine {
         }
 
         // v29: Use 1MB blocks instead of 16KB to reduce QEMU section table fragmentation.
-        // The QEMU assertion (map->sections_nb < TARGET_PAGE_SIZE) fires when too many
-        // small mem_map calls exhaust the section table.
         var AUTO_BLOCK = 0x100000; // 1MB
         var aligned = addr & ~(AUTO_BLOCK - 1);
         if (!this._autoMapped.has(aligned)) {
@@ -741,6 +739,20 @@ class ScorpioEngine {
                 this.emu.mem_map(aligned, AUTO_BLOCK, uc.PROT_ALL);
                 this._autoMapped.add(aligned);
                 this.memMapped += AUTO_BLOCK;
+
+                // v29d: Fill blocks below BASE with BX LR to prevent NOP-slide spin.
+                // Data auto-maps below BASE can later be executed if code jumps there
+                // via corrupted pointers. Without fill, the zeros decode as ANDEQ (NOP).
+                if ((aligned >>> 0) < this.BASE) {
+                    var stub = [0x00, 0x00, 0xA0, 0xE3, 0x1E, 0xFF, 0x2F, 0xE1]; // MOV R0,#0; BX LR
+                    var fill = [];
+                    for (var si = 0; si < 512; si++) {
+                        for (var sj = 0; sj < 8; sj++) fill.push(stub[sj]);
+                    }
+                    for (var off = 0; off < AUTO_BLOCK; off += 4096) {
+                        this.emu.mem_write(aligned + off, fill);
+                    }
+                }
 
                 if (this._unmappedAccessLog.length < this._maxUnmappedLog) {
                     var pc = this._readReg(uc.ARM_REG_PC);
