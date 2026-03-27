@@ -1211,6 +1211,36 @@ const AndroidShims = {
                                 fs[20] = bufSize & 0xFF; fs[21] = (bufSize >> 8) & 0xFF;
                                 fs[22] = (bufSize >> 16) & 0xFF; fs[23] = (bufSize >> 24) & 0xFF;
 
+                                // v29e: Set FILE function pointers (offsets 28-44)
+                                // Without these, bionic's fwrite/fflush/fgetc call NULL → infinite retry
+                                // _lbfsize at offset 24: 0 (no line buffering)
+                                // _cookie at offset 28: fd (used by _read/_write/_close/_seek)
+                                var cookieVal = fd;
+                                fs[28] = cookieVal & 0xFF; fs[29] = (cookieVal >> 8) & 0xFF;
+                                fs[30] = (cookieVal >> 16) & 0xFF; fs[31] = (cookieVal >> 24) & 0xFF;
+
+                                if (self.engine) {
+                                    // _close at offset 32
+                                    var closeStub = self.engine.FILE_CLOSE_STUB || 0;
+                                    fs[32] = closeStub & 0xFF; fs[33] = (closeStub >> 8) & 0xFF;
+                                    fs[34] = (closeStub >> 16) & 0xFF; fs[35] = (closeStub >> 24) & 0xFF;
+
+                                    // _read at offset 36
+                                    var readStub = self.engine.FILE_READ_STUB || 0;
+                                    fs[36] = readStub & 0xFF; fs[37] = (readStub >> 8) & 0xFF;
+                                    fs[38] = (readStub >> 16) & 0xFF; fs[39] = (readStub >> 24) & 0xFF;
+
+                                    // _seek at offset 40
+                                    var seekStub = self.engine.FILE_SEEK_STUB || 0;
+                                    fs[40] = seekStub & 0xFF; fs[41] = (seekStub >> 8) & 0xFF;
+                                    fs[42] = (seekStub >> 16) & 0xFF; fs[43] = (seekStub >> 24) & 0xFF;
+
+                                    // _write at offset 44
+                                    var writeStub = self.engine.FILE_WRITE_STUB || 0;
+                                    fs[44] = writeStub & 0xFF; fs[45] = (writeStub >> 8) & 0xFF;
+                                    fs[46] = (writeStub >> 16) & 0xFF; fs[47] = (writeStub >> 24) & 0xFF;
+                                }
+
                                 emu.mem_write(filePtr, fs);
                                 // v28c: Verify FILE struct was written correctly
                                 var fsVerify = emu.mem_read(filePtr, 24);

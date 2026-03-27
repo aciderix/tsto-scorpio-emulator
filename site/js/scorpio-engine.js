@@ -191,6 +191,41 @@ class ScorpioEngine {
             0x1E, 0xFF, 0x2F, 0xE1,  // BX LR
         ]);
 
+        // v29e: FILE struct function pointer stubs
+        // Bionic's internal fwrite/fflush/fgetc call _read/_write/_close/_seek via
+        // function pointers in the FILE struct. If these are NULL, bionic calls 0x0,
+        // our BX LR stub returns 0, and bionic retries infinitely.
+        // Fix: provide proper stubs at known SHIM addresses.
+        this.FILE_READ_STUB  = this.SHIM_BASE + 0xFD000;  // 0xE00FD000
+        this.FILE_WRITE_STUB = this.SHIM_BASE + 0xFD010;  // 0xE00FD010
+        this.FILE_CLOSE_STUB = this.SHIM_BASE + 0xFD020;  // 0xE00FD020
+        this.FILE_SEEK_STUB  = this.SHIM_BASE + 0xFD030;  // 0xE00FD030
+
+        // _read(cookie, buf, count) → return -1 (EOF, no data)
+        // MVN R0, #0 = 0xE3E00000; BX LR = 0xE12FFF1E
+        this.emu.mem_write(this.FILE_READ_STUB, [
+            0x00, 0x00, 0xE0, 0xE3,  // MVN R0, #0 (R0 = -1)
+            0x1E, 0xFF, 0x2F, 0xE1,  // BX LR
+        ]);
+        // _write(cookie, buf, count) → return count (R2) = pretend all bytes written
+        // MOV R0, R2 = 0xE1A00002; BX LR = 0xE12FFF1E
+        this.emu.mem_write(this.FILE_WRITE_STUB, [
+            0x02, 0x00, 0xA0, 0xE1,  // MOV R0, R2
+            0x1E, 0xFF, 0x2F, 0xE1,  // BX LR
+        ]);
+        // _close(cookie) → return 0 (success)
+        this.emu.mem_write(this.FILE_CLOSE_STUB, [
+            0x00, 0x00, 0xA0, 0xE3,  // MOV R0, #0
+            0x1E, 0xFF, 0x2F, 0xE1,  // BX LR
+        ]);
+        // _seek(cookie, pos, whence) → return 0
+        this.emu.mem_write(this.FILE_SEEK_STUB, [
+            0x00, 0x00, 0xA0, 0xE3,  // MOV R0, #0
+            0x1E, 0xFF, 0x2F, 0xE1,  // BX LR
+        ]);
+        Logger.info('[v29e] FILE struct function stubs written at 0x' +
+            this.FILE_READ_STUB.toString(16) + '-0x' + (this.FILE_SEEK_STUB + 8).toString(16));
+
         // Setup JNI environment (maps string heap + writes JNI structures)
         this.jni.setup(this.emu);
 
