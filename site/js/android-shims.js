@@ -1113,6 +1113,17 @@ const AndroidShims = {
 
                 Logger.info('[fopen] ATTEMPT: "' + path + '" mode=' + mode);
 
+                // v29f: Return NULL for telemetry/log files — the game handles NULL
+                // gracefully by skipping processing. Creating FILE structs for these
+                // causes infinite spin loops in bionic's fwrite/fgetc internal state machine.
+                var telemetryFiles = ['SendingFunnelLog', 'LoadingFunnelLog', 'LoadingFunnelLog_timesPurged',
+                                      'prefbackup', 'synergy_uid_override'];
+                var baseName = path ? path.replace(/.*\//, '') : '';
+                if (telemetryFiles.indexOf(baseName) >= 0) {
+                    Logger.info('[fopen] SKIP telemetry file: ' + baseName + ' → returning NULL');
+                    return 0;
+                }
+
                 // Try VFS first
                 if (self.vfs) {
                     var fd = self.vfs.fopen(path, mode);
@@ -1242,13 +1253,17 @@ const AndroidShims = {
                                 }
 
                                 emu.mem_write(filePtr, fs);
-                                // v28c: Verify FILE struct was written correctly
-                                var fsVerify = emu.mem_read(filePtr, 24);
+                                // v29f: Verify FILE struct including function pointers
+                                var fsVerify = emu.mem_read(filePtr, 48);
                                 var vp = (fsVerify[0] | (fsVerify[1] << 8) | (fsVerify[2] << 16) | (fsVerify[3] << 24)) >>> 0;
                                 var vr = (fsVerify[4] | (fsVerify[5] << 8) | (fsVerify[6] << 16) | (fsVerify[7] << 24)) >>> 0;
                                 var vbase = (fsVerify[16] | (fsVerify[17] << 8) | (fsVerify[18] << 16) | (fsVerify[19] << 24)) >>> 0;
                                 var vsize = (fsVerify[20] | (fsVerify[21] << 8) | (fsVerify[22] << 16) | (fsVerify[23] << 24)) >>> 0;
-                                Logger.info('[fopen] FILE struct verify: _p=0x' + vp.toString(16) + ' _r=' + vr + ' _bf.base=0x' + vbase.toString(16) + ' _bf.size=' + vsize);
+                                var vclose = (fsVerify[32] | (fsVerify[33] << 8) | (fsVerify[34] << 16) | (fsVerify[35] << 24)) >>> 0;
+                                var vread = (fsVerify[36] | (fsVerify[37] << 8) | (fsVerify[38] << 16) | (fsVerify[39] << 24)) >>> 0;
+                                var vwrite = (fsVerify[44] | (fsVerify[45] << 8) | (fsVerify[46] << 16) | (fsVerify[47] << 24)) >>> 0;
+                                Logger.info('[fopen] FILE struct verify: _p=0x' + vp.toString(16) + ' _r=' + vr + ' _bf.base=0x' + vbase.toString(16) + ' _bf.size=' + vsize +
+                                    ' _close=0x' + vclose.toString(16) + ' _read=0x' + vread.toString(16) + ' _write=0x' + vwrite.toString(16));
                             } catch(e) {
                                 Logger.warn('[fopen] Failed to write FILE struct: ' + e.message);
                             }
