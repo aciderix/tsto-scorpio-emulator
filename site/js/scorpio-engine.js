@@ -797,9 +797,10 @@ class ScorpioEngine {
         var startInsns = this.totalInstructions;
 
         try {
-            // v27: Init mode uses 20M — ScorpioJNI_init needs >2M to fully complete (was truncated at 2M,
-            // preventing thread creation and network init). Game frames use configurable limit.
-            var maxInsns = initMode ? 20000000 : this.maxFrameInsns;
+            // v29: Init mode uses 100M — ScorpioJNI_init was hitting 20M cap without completing
+            // (R0=0x0 = incomplete). With QEMU section overflow fixed, init runs longer and needs
+            // more budget to fully initialize game state (singleton fields, threads, networking).
+            var maxInsns = initMode ? 100000000 : this.maxFrameInsns;
             // v17: Use RETURN_SENTINEL as stop address — distinct from GENERIC_RETURN
             var stopAddr = this.RETURN_SENTINEL;
             if (isThumb) {
@@ -815,7 +816,7 @@ class ScorpioEngine {
             Logger.success(name + ': ' + insns + ' instructions, R0=0x' + (r0 >>> 0).toString(16));
 
             // If we hit the instruction limit, dump where we stopped (spin loop detection)
-            if (!initMode && insns >= maxInsns - 10) {
+            if (insns >= maxInsns - 10) {
                 var pcOffset = (endPC - this.BASE) >>> 0;
                 Logger.warn('[SPIN?] Execution stopped at PC=0x' + (endPC>>>0).toString(16) +
                     ' (BIN+0x' + pcOffset.toString(16) + ') LR=0x' + (endLR>>>0).toString(16));

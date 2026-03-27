@@ -76,9 +76,11 @@ const AndroidShims = {
             // Telemetry/log files — game opens these; provide empty stubs
             this.vfs.addFile('/SendingFunnelLog', '');
             this.vfs.addFile('/LoadingFunnelLog', '');
+            this.vfs.addFile('/LoadingFunnelLog_timesPurged', '');
             this.vfs.addFile('/prefbackup', '');
             this.vfs.addFile('SendingFunnelLog', '');
             this.vfs.addFile('LoadingFunnelLog', '');
+            this.vfs.addFile('LoadingFunnelLog_timesPurged', '');
             this.vfs.addFile('prefbackup', '');
             Logger.info('[VFS] v29: Registered synergy_uid_override + telemetry stubs');
         }
