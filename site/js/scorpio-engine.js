@@ -153,6 +153,34 @@ class ScorpioEngine {
         Logger.success('Binary loaded: ' + (totalWritten/1024/1024).toFixed(1) + ' MB via ' +
             this.elf.segments.filter(function(s){return s.type===1}).length + ' LOAD segments (with relocations)');
 
+        // v30: Shadow-map the binary at VA 0 (unrelocated address space)
+        // Some function/data pointers in the binary are unrelocated — they reference
+        // VA 0x100586 instead of BASE+0x100586. By mapping the relocated binary at VA 0,
+        // these unrelocated accesses transparently work (both code FETCH and data READ).
+        Logger.arm('v30: Shadow-mapping binary at VA 0 for unrelocated pointer support...');
+        try {
+            this.emu.mem_map(0, mapSize, uc.PROT_ALL);
+            this.memMapped += mapSize;
+            // Register these blocks with auto-mapper to prevent double-mapping
+            for (var soff = 0; soff < mapSize; soff += 0x100000) {
+                this._autoMapped.add(soff);
+            }
+            for (var seg of this.elf.segments) {
+                if (seg.type !== 1) continue;
+                for (var off = 0; off < seg.filesz; off += CHUNK) {
+                    var end = Math.min(off + CHUNK, seg.filesz);
+                    var filePos = seg.offset + off;
+                    var memAddr = seg.vaddr + off; // VA 0-based (no BASE)
+                    var chunk = Array.from(u8.slice(filePos, filePos + (end - off)));
+                    this.emu.mem_write(memAddr, chunk);
+                }
+            }
+            Logger.success('v30: Shadow binary mapped at 0x0-0x' + mapSize.toString(16) +
+                ' (' + (mapSize/1024/1024).toFixed(1) + ' MB)');
+        } catch(e) {
+            Logger.warn('v30: Shadow map failed: ' + e.message);
+        }
+
         // BSS
         for (var seg of this.elf.segments) {
             if (seg.type !== 1) continue;
@@ -710,16 +738,53 @@ class ScorpioEngine {
     }
 
     _handleUnmapped(type, addr, size) {
-        // v19: NULL function pointer call (FETCH below BASE)
-        // Instead of stopping, simulate "return 0" so execution continues.
-        // This handles uninitialized vtable entries in objects whose constructors
-        // hit missing dependencies. The caller gets R0=0 back and can check for failure.
+        // v30: Unrelocated function pointer redirect
+        // If FETCH targets addr below BASE but (BASE + addr) is within binary range,
+        // this is an unrelocated function pointer (missing R_ARM_RELATIVE).
+        // Redirect PC to the correct address instead of returning 0.
         if (type === 'fetch' && (addr >>> 0) < this.BASE) {
             var pc = this._readReg(uc.ARM_REG_PC);
             var lr = this._readReg(uc.ARM_REG_LR);
             var r0 = this._readReg(uc.ARM_REG_R0);
-            // Only auto-return if LR looks valid (inside binary or shim space)
             var lrUnsigned = lr >>> 0;
+
+            // v30: Check if this is an unrelocated binary address
+            var relocatedAddr = (this.BASE + addr) >>> 0;
+            var binaryEnd = (this.BASE + this.elf.mapSize) >>> 0;
+            if (addr > 0 && relocatedAddr >= this.BASE && relocatedAddr < binaryEnd) {
+                if (!this._unrelocRedirectCount) this._unrelocRedirectCount = 0;
+                this._unrelocRedirectCount++;
+                if (this._unrelocRedirectCount <= 20) {
+                    Logger.warn('[MEM] v30: Unrelocated function ptr 0x' + (addr>>>0).toString(16) +
+                        ' → redirecting to 0x' + relocatedAddr.toString(16) +
+                        ' (BASE+0x' + (addr>>>0).toString(16) + ') LR=0x' + lrUnsigned.toString(16));
+                }
+                // Map the page containing the unrelocated address (in case it's not mapped)
+                var CODE_BLOCK = 0x100000;
+                var aligned = addr & ~(CODE_BLOCK - 1);
+                if (!this._autoMapped.has(aligned)) {
+                    try {
+                        this.emu.mem_map(aligned, CODE_BLOCK, uc.PROT_ALL);
+                        this._autoMapped.add(aligned);
+                    } catch(e) {}
+                }
+                // Write a branch to the correct address at the target location
+                // ARM: LDR PC, [PC, #-4] followed by the target address
+                // This is a PC-relative load: when PC is at addr, it reads addr+8-4=addr+4
+                try {
+                    var b0 = relocatedAddr & 0xFF;
+                    var b1 = (relocatedAddr >> 8) & 0xFF;
+                    var b2 = (relocatedAddr >> 16) & 0xFF;
+                    var b3 = (relocatedAddr >> 24) & 0xFF;
+                    this.emu.mem_write(addr, [
+                        0x04, 0xF0, 0x1F, 0xE5,  // LDR PC, [PC, #-4]
+                        b0, b1, b2, b3            // target address
+                    ]);
+                } catch(e) {}
+                return true;  // let execution continue — will jump to correct address
+            }
+
+            // Genuine NULL function pointer (addr doesn't map to binary)
             if (lrUnsigned >= this.BASE || (lrUnsigned >= 0xe0000000 && lrUnsigned < 0xf0000000)) {
                 if (!this._nullPtrCount) this._nullPtrCount = 0;
                 this._nullPtrCount++;
@@ -729,9 +794,6 @@ class ScorpioEngine {
                         ' R0=0x' + (r0>>>0).toString(16));
                 }
                 // Map the page so Unicorn doesn't fault, fill entirely with BX LR
-                // v29c: Fill entire block with "MOV R0,#0; BX LR" to prevent zero-NOP spin.
-                // Previously only wrote stub at target addr — rest was zeros (ANDEQ = NOP),
-                // causing ScorpioJNI_init to burn 100M instructions sliding through zeros.
                 var CODE_BLOCK = 0x100000;
                 var aligned = addr & ~(CODE_BLOCK - 1);
                 if (!this._autoMapped.has(aligned)) {
@@ -741,21 +803,18 @@ class ScorpioEngine {
                         // Fill with MOV R0,#0; BX LR every 8 bytes
                         var stub = [0x00, 0x00, 0xA0, 0xE3, 0x1E, 0xFF, 0x2F, 0xE1];
                         var fill = [];
-                        // Fill 4KB at a time (512 stubs)
                         for (var si = 0; si < 512; si++) {
                             for (var sj = 0; sj < 8; sj++) fill.push(stub[sj]);
                         }
-                        // Write 4KB chunks across the 1MB block
                         for (var off = 0; off < CODE_BLOCK; off += 4096) {
                             this.emu.mem_write(aligned + off, fill);
                         }
                     } catch(e) {}
                 }
-                // Also write at the exact target address (redundant but safe)
                 try {
                     this.emu.mem_write(addr, [0x00, 0x00, 0xA0, 0xE3, 0x1E, 0xFF, 0x2F, 0xE1]);
                 } catch(e) {}
-                return true;  // let execution continue into our stub
+                return true;
             }
             // LR not valid — hard stop
             Logger.error('[MEM] FETCH below BASE at 0x' + (addr>>>0).toString(16) +
