@@ -10,13 +10,13 @@ import os
 from collections import Counter, defaultdict
 
 # Latest log files (post-v29 push)
-CONSOLE_LOG = "logs/console-20260326-173118.txt"
-RAW_LOG = "logs/tsto-raw-logs-2026-03-26T17-39-30.449Z.txt"
-REPORT = "logs/tsto-report-2026-03-26T17-39-27.958Z.txt"
-REPORT2 = "logs/report-20260326-173118.txt"
-ENGINE_STATS = "logs/engine-stats-20260326-173118.json"
-ARM_TRACE = "logs/arm-trace-20260326-173118.txt"
-CAPTURED = "logs/captured-logs-20260326-173118.json"
+CONSOLE_LOG = "logs/console-20260327-145801.txt"
+RAW_LOG = ""
+REPORT = "logs/report-20260327-145801.txt"
+REPORT2 = ""
+ENGINE_STATS = "logs/engine-stats-20260327-145801.json"
+ARM_TRACE = "logs/arm-trace-20260327-145801.txt"
+CAPTURED = "logs/captured-logs-20260327-145801.json"
 
 def read_file(path, max_lines=None):
     try:
