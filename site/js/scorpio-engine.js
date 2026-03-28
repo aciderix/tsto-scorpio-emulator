@@ -239,6 +239,8 @@ class ScorpioEngine {
 
         // Setup JNI environment (maps string heap + writes JNI structures)
         this.jni.setup(this.emu);
+        // v32: Back-reference for diagnostics
+        this.jni.engine = this;
 
         // Setup shims (Android + GL + JNI vtable handlers)
         this._setupShims();
@@ -907,6 +909,23 @@ class ScorpioEngine {
                         self._recentShimCalls.shift();
                     }
 
+                    // v32: Log all shim calls during LifecycleStart for diagnostics
+                    if (self._logAllShimCalls && !handler.name.startsWith('__aeabi') &&
+                        handler.name !== 'memcpy' && handler.name !== 'memset' &&
+                        handler.name !== 'memmove' && handler.name !== 'strlen' &&
+                        handler.name !== 'strcmp' && handler.name !== 'strcpy' &&
+                        handler.name !== 'strncpy' && handler.name !== 'strncmp' &&
+                        handler.name !== 'memcmp' && handler.name !== 'strcat' &&
+                        handler.name !== 'strchr' && handler.name !== 'strrchr' &&
+                        handler.name !== 'strstr') {
+                        Logger.info('[v32-SHIM] ' + handler.name +
+                            ' LR=0x' + (lr>>>0).toString(16) +
+                            ' R0=0x' + (r0>>>0).toString(16) +
+                            ' R1=0x' + (r1>>>0).toString(16) +
+                            ' R2=0x' + (r2>>>0).toString(16) +
+                            ' R3=0x' + (r3>>>0).toString(16));
+                    }
+
                     var result = handler.handler(self.emu, [r0, r1, r2, r3]);
                     if (result !== undefined && result !== null) {
                         self._writeReg(uc.ARM_REG_R0, result >>> 0);
@@ -1461,8 +1480,11 @@ class ScorpioEngine {
 
         // Step 7: Lifecycle.Start
         Logger.info('Step 7/9: Lifecycle.Start');
+        // v32: Enable full shim call logging during LifecycleStart for diagnostics
+        this._logAllShimCalls = true;
         results.push(this.callFunction('Java_com_ea_simpsons_ScorpioJNI_LifecycleStart',
             this.jni.prepareCall('LifecycleStart'), true));
+        this._logAllShimCalls = false;
 
         // v32: Also call downloadComplete AFTER LifecycleStart.
         // LifecycleStart may initialize the DLC manager that downloadComplete needs.
