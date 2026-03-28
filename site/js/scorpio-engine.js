@@ -856,6 +856,46 @@ class ScorpioEngine {
         this.emu.hook_add(uc.HOOK_CODE, function(addr, size) {
             self.totalInstructions++;
 
+            // v33: Targeted ARM trace between fread and fclose for BGrm parsing
+            if (self._traceBGrmParse && addr >= self.BASE && addr < self.BASE + self.BIN_SIZE) {
+                if (self._traceBGrmCount < self._traceBGrmMax) {
+                    self._traceBGrmCount++;
+                    var trR0 = self._readReg(uc.ARM_REG_R0);
+                    var trR1 = self._readReg(uc.ARM_REG_R1);
+                    var trR2 = self._readReg(uc.ARM_REG_R2);
+                    var trR3 = self._readReg(uc.ARM_REG_R3);
+                    var trSP = self._readReg(uc.ARM_REG_SP);
+                    var trLR = self._readReg(uc.ARM_REG_LR);
+                    var trPC = addr;
+                    var offset = trPC - self.BASE;
+                    // Read instruction bytes
+                    var insBytes;
+                    try { insBytes = self.emu.mem_read(trPC, 4); } catch(e) { insBytes = [0,0,0,0]; }
+                    var insHex = Array.from(insBytes).map(function(b) { return b.toString(16).padStart(2,'0'); }).join('');
+                    Logger.info('[v33-ARM] #' + self._traceBGrmCount +
+                        ' BIN+0x' + offset.toString(16) +
+                        ' [' + insHex + ']' +
+                        ' R0=0x' + (trR0>>>0).toString(16) +
+                        ' R1=0x' + (trR1>>>0).toString(16) +
+                        ' R2=0x' + (trR2>>>0).toString(16) +
+                        ' R3=0x' + (trR3>>>0).toString(16) +
+                        ' SP=0x' + (trSP>>>0).toString(16) +
+                        ' LR=0x' + (trLR>>>0).toString(16));
+                    // On first instruction, also dump the fread destination buffer
+                    if (self._traceBGrmCount === 1 && self._traceBGrmDestPtr) {
+                        try {
+                            var dstBytes = self.emu.mem_read(self._traceBGrmDestPtr, 8);
+                            Logger.info('[v33-ARM] fread dest[0x' + self._traceBGrmDestPtr.toString(16) + ']: ' +
+                                Array.from(dstBytes).map(function(b) { return b.toString(16).padStart(2,'0'); }).join(' '));
+                        } catch(e) {}
+                    }
+                }
+                if (self._traceBGrmCount >= self._traceBGrmMax) {
+                    self._traceBGrmParse = false;
+                    Logger.warn('[v33-ARM] Trace limit reached (' + self._traceBGrmMax + ' instructions)');
+                }
+            }
+
             // v31: Intercept patched SVC instructions (bionic syscalls)
             if (self._svcAddresses && self._svcAddresses.has(addr)) {
                 self._handleSVC();

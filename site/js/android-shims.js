@@ -1296,6 +1296,11 @@ const AndroidShims = {
             },
             'fclose':  function(emu, args) {
                 var filePtr = args[0];
+                // v33: Stop ARM trace when fclose is reached
+                if (self.engine._traceBGrmParse) {
+                    Logger.warn('[v33] BGrm ARM trace ended at fclose after ' + self.engine._traceBGrmCount + ' instructions');
+                    self.engine._traceBGrmParse = false;
+                }
                 // v28: Resolve FILE* to fd and free resources
                 var fd = filePtr;
                 if (self._filePtrToFd && self._filePtrToFd.has(filePtr)) {
@@ -1371,6 +1376,15 @@ const AndroidShims = {
 
                     // v28b: Sync FILE struct buffer pointers after read
                     self._syncFileStruct(emu, filePtr, fd);
+
+                    // v33: Enable ARM trace after reading BGrm magic
+                    if (fd === 100 && posBefore === 0 && result > 0) {
+                        self.engine._traceBGrmParse = true;
+                        self.engine._traceBGrmCount = 0;
+                        self.engine._traceBGrmMax = 300;
+                        self.engine._traceBGrmDestPtr = destPtr;
+                        Logger.warn('[v33] Enabling ARM trace after BGrm fread destPtr=0x' + destPtr.toString(16));
+                    }
 
                     // Log fread calls with data preview
                     if (self._freadLogCount < 200) {
