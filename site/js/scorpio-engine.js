@@ -857,7 +857,7 @@ class ScorpioEngine {
             self.totalInstructions++;
 
             // v33: Targeted ARM trace between fread and fclose for BGrm parsing
-            if (self._traceBGrmParse && addr >= self.BASE && addr < self.BASE + self.BIN_SIZE) {
+            if (self._traceBGrmParse && addr >= self.BASE && addr < (self.BASE + (self.elf ? self.elf.mapSize : 0x2000000))) {
                 if (self._traceBGrmCount < self._traceBGrmMax) {
                     self._traceBGrmCount++;
                     var trR0 = self._readReg(uc.ARM_REG_R0);
