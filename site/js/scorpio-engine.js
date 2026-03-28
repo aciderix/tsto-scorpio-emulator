@@ -870,6 +870,32 @@ class ScorpioEngine {
         this.emu.hook_add(uc.HOOK_CODE, function(addr, size) {
             self.totalInstructions++;
 
+            // v33f: Targeted ARM trace for BGrm 16-bit reads
+            if (self._traceBGrmParse && addr >= self.BASE && addr < (self.BASE + (self.elf ? self.elf.mapSize : 0x2000000))) {
+                if (self._traceBGrmCount < self._traceBGrmMax) {
+                    self._traceBGrmCount++;
+                    var tr0 = self._readReg(uc.ARM_REG_R0);
+                    var tr1 = self._readReg(uc.ARM_REG_R1);
+                    var tr2 = self._readReg(uc.ARM_REG_R2);
+                    var tr3 = self._readReg(uc.ARM_REG_R3);
+                    var trSP = self._readReg(uc.ARM_REG_SP);
+                    var trLR = self._readReg(uc.ARM_REG_LR);
+                    var off = addr - self.BASE;
+                    var ib; try { ib = self.emu.mem_read(addr, 4); } catch(e) { ib = [0,0,0,0]; }
+                    Logger.info('[v33f-ARM] #' + self._traceBGrmCount +
+                        ' +0x' + off.toString(16) +
+                        ' [' + Array.from(ib).map(function(b){return b.toString(16).padStart(2,'0');}).join('') + ']' +
+                        ' R0=0x' + (tr0>>>0).toString(16) +
+                        ' R1=0x' + (tr1>>>0).toString(16) +
+                        ' R2=0x' + (tr2>>>0).toString(16) +
+                        ' R3=0x' + (tr3>>>0).toString(16) +
+                        ' SP=0x' + (trSP>>>0).toString(16) +
+                        ' LR=0x' + (trLR>>>0).toString(16));
+                } else {
+                    self._traceBGrmParse = false;
+                }
+            }
+
             // v31: Intercept patched SVC instructions (bionic syscalls)
             if (self._svcAddresses && self._svcAddresses.has(addr)) {
                 self._handleSVC();

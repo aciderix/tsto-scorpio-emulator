@@ -1372,6 +1372,15 @@ const AndroidShims = {
                     // v28b: Sync FILE struct buffer pointers after read
                     self._syncFileStruct(emu, filePtr, fd);
 
+                    // v33f: Trace ARM after 2-byte reads from BGrm to find missing byte-swap
+                    if (fd === 100 && itemSize === 2 && result > 0 && !self.engine._traceBGrmDone) {
+                        self.engine._traceBGrmParse = true;
+                        self.engine._traceBGrmCount = 0;
+                        self.engine._traceBGrmMax = 200;
+                        self.engine._traceBGrmDone = true; // only trace once
+                        Logger.warn('[v33f] Enabling ARM trace after 2-byte BGrm fread pos=' + posBefore);
+                    }
+
                     // Log fread calls with data preview
                     if (self._freadLogCount < 200) {
                         self._freadLogCount++;
@@ -1508,6 +1517,11 @@ const AndroidShims = {
                 return 0;
             },
             'fseek':   function(emu, args) {
+                // v33f: Stop trace on fseek
+                if (self.engine._traceBGrmParse) {
+                    Logger.warn('[v33f] ARM trace ended at fseek after ' + self.engine._traceBGrmCount + ' insns, offset=' + (args[1]|0));
+                    self.engine._traceBGrmParse = false;
+                }
                 var filePtr = args[0];
                 var fd = (self._filePtrToFd && self._filePtrToFd.has(filePtr)) ? self._filePtrToFd.get(filePtr) : filePtr;
                 var offset = args[1] | 0; // signed
