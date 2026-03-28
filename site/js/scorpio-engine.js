@@ -204,7 +204,10 @@ class ScorpioEngine {
         this.emu.mem_write(this.BASE + 0x12DE2B0, [0x30, 0x0f, 0xbf, 0xe6]); // REVNE R0,R0 → REV R0,R0
         this.emu.mem_write(this.BASE + 0x12DE508, [0x31, 0x1f, 0xbf, 0xe6]); // REVNE R1,R1 → REV R1,R1
         this.emu.mem_write(this.BASE + 0x12DE548, [0x31, 0x1f, 0xbf, 0xe6]); // REVNE R1,R1 → REV R1,R1
-        Logger.success('v33: Patched 3 REVNE→REV in BGrm reader (endianness byte-swap fix)');
+        // v33e: Also patch conditional REV16 (16-bit byte-swap) for uint16 header values
+        this.emu.mem_write(this.BASE + 0x12DE588, [0xb1, 0x1f, 0xbf, 0xe6]); // REV16NE R1,R1 → REV16 R1,R1
+        this.emu.mem_write(this.BASE + 0x12DE5C8, [0xb1, 0x1f, 0xbf, 0xe6]); // REV16NE R1,R1 → REV16 R1,R1
+        Logger.success('v33: Patched 3 REVNE→REV + 2 REV16NE→REV16 in BGrm reader');
 
         // Map stack
         this.emu.mem_map(this.STACK, this.STACK_SIZE, uc.PROT_ALL);
