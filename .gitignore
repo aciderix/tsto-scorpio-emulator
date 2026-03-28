@@ -6,3 +6,4 @@ screenshots/
 package-lock.json
 refs/
 .dlc-cache/
+logs/
