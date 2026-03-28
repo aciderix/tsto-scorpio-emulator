@@ -596,10 +596,10 @@ class ScorpioEngine {
                 try { data = this.emu.mem_read(memAddr, chunkSize); } catch(e) { continue; }
 
                 for (var i = 0; i < chunkSize; i += 4) {
-                    // ARM SVC encoding: cond 1111 imm24
-                    // byte[3] = cond:4 | 0xF:4, so (byte[3] & 0x0F) == 0x0F
-                    // Exclude cond=1111 (0xFF prefix = unconditional extension, not SVC)
-                    if ((data[i + 3] & 0x0F) === 0x0F && (data[i + 3] & 0xF0) !== 0xF0) {
+                    // Match EXACTLY: SVC #0 with AL condition = 0xEF000000
+                    // Little-endian bytes: [0x00, 0x00, 0x00, 0xEF]
+                    if (data[i] === 0x00 && data[i + 1] === 0x00 &&
+                        data[i + 2] === 0x00 && data[i + 3] === 0xEF) {
                         var addr = memAddr + i;
                         this._svcAddresses.add(addr);
                         try { this.emu.mem_write(addr, armNOP); } catch(e) {}
