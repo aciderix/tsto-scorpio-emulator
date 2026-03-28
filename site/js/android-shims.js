@@ -67,6 +67,9 @@ const AndroidShims = {
         this._direntBuf = 0;
         this._filePtrToFd = new Map();
         this._filePtrBufs = new Map();
+        // v35: Expose for cross-module diagnostics
+        window._filePtrToFd = this._filePtrToFd;
+        window._filePtrBufs = this._filePtrBufs;
         this._freadLogCount = 0;
         // v29: Register missing VFS files the game expects to find
         if (this.vfs) {
@@ -1372,15 +1375,6 @@ const AndroidShims = {
                     // v28b: Sync FILE struct buffer pointers after read
                     self._syncFileStruct(emu, filePtr, fd);
 
-                    // v33f: Trace ARM after 2-byte reads from BGrm to find missing byte-swap
-                    if (fd === 100 && itemSize === 2 && result > 0 && !self.engine._traceBGrmDone) {
-                        self.engine._traceBGrmParse = true;
-                        self.engine._traceBGrmCount = 0;
-                        self.engine._traceBGrmMax = 200;
-                        self.engine._traceBGrmDone = true; // only trace once
-                        Logger.warn('[v33f] Enabling ARM trace after 2-byte BGrm fread pos=' + posBefore);
-                    }
-
                     // Log fread calls with data preview
                     if (self._freadLogCount < 200) {
                         self._freadLogCount++;
@@ -1517,11 +1511,6 @@ const AndroidShims = {
                 return 0;
             },
             'fseek':   function(emu, args) {
-                // v33f: Stop trace on fseek
-                if (self.engine._traceBGrmParse) {
-                    Logger.warn('[v33f] ARM trace ended at fseek after ' + self.engine._traceBGrmCount + ' insns, offset=' + (args[1]|0));
-                    self.engine._traceBGrmParse = false;
-                }
                 var filePtr = args[0];
                 var fd = (self._filePtrToFd && self._filePtrToFd.has(filePtr)) ? self._filePtrToFd.get(filePtr) : filePtr;
                 var offset = args[1] | 0; // signed
@@ -2107,7 +2096,26 @@ const AndroidShims = {
             // ============================================
             // C++ new/delete
             // ============================================
-            '_Znwj':   function(emu, args) { return self.malloc(args[0] || 16); },
+            '_Znwj':   function(emu, args) {
+                var size = args[0] || 16;
+                var ptr = self.malloc(size);
+                // v33g: Fix BGrm reader endianness detection.
+                // The BGrm reader (64 bytes, allocated from LR=0x112d4eb0) has endianness
+                // fields at +0x10 (platform) and +0x14 (file). Both stay 0 because
+                // the platform endianness detection fails. Set +0x10 to 1 (LE) so it
+                // differs from +0x14 (0 = BE), enabling all conditional byte-swaps.
+                if (size === 0x40 && ptr) {
+                    var lr = self.engine._readReg(uc.ARM_REG_LR);
+                    if ((lr >>> 0) === 0x112d4eb0) {
+                        try {
+                            emu.mem_write(ptr + 0x10, [0x01, 0x00, 0x00, 0x00]);
+                            Logger.info('[v33g] Set BGrm reader endianness field at 0x' +
+                                (ptr + 0x10).toString(16) + ' = 1 (LE != BE)');
+                        } catch(e) {}
+                    }
+                }
+                return ptr;
+            },
             '_Znaj':   function(emu, args) { return self.malloc(args[0] || 16); },
             '_ZdlPv':  function(emu, args) { self.free(args[0]); return 0; },
             '_ZdaPv':  function(emu, args) { self.free(args[0]); return 0; },
@@ -2145,13 +2153,151 @@ const AndroidShims = {
             '__cxa_guard_abort':   function(emu, args) { return 0; },
 
             // ============================================
-            // Compression (zlib stubs)
+            // Compression (zlib — real implementations via pako)
             // ============================================
-            'inflate':       function(emu, args) { return 0; },
-            'inflateInit2_': function(emu, args) { return 0; },
-            'inflateEnd':    function(emu, args) { return 0; },
-            'inflateReset':  function(emu, args) { return 0; },
-            'inflateInit_':  function(emu, args) { return 0; },
+
+            // uncompress(dest, destLenPtr, source, sourceLen) → Z_OK(0) or error
+            'uncompress': function(emu, args) {
+                var dest = args[0], destLenPtr = args[1], source = args[2], sourceLen = args[3];
+                try {
+                    if (!source || !sourceLen || !dest || !destLenPtr) return -2; // Z_STREAM_ERROR
+                    var compressed = emu.mem_read(source, sourceLen);
+                    var destLenBytes = emu.mem_read(destLenPtr, 4);
+                    var destLen = (destLenBytes[0] | (destLenBytes[1] << 8) | (destLenBytes[2] << 16) | (destLenBytes[3] << 24)) >>> 0;
+                    // Use pako.inflate with raw mode (no zlib/gzip header — just raw deflate)
+                    // Try raw first, fall back to zlib-wrapped
+                    var decompressed;
+                    try {
+                        decompressed = pako.inflate(new Uint8Array(compressed));
+                    } catch(e1) {
+                        try {
+                            decompressed = pako.inflateRaw(new Uint8Array(compressed));
+                        } catch(e2) {
+                            Logger.warn('[ZLIB] uncompress failed: ' + e1.message);
+                            return -3; // Z_DATA_ERROR
+                        }
+                    }
+                    if (decompressed.length > destLen) {
+                        Logger.warn('[ZLIB] uncompress: output ' + decompressed.length + ' > destLen ' + destLen);
+                        return -5; // Z_BUF_ERROR
+                    }
+                    emu.mem_write(dest, Array.from(decompressed));
+                    // Write actual output length back to destLenPtr (LE)
+                    var outLen = decompressed.length;
+                    emu.mem_write(destLenPtr, [outLen & 0xFF, (outLen >> 8) & 0xFF, (outLen >> 16) & 0xFF, (outLen >> 24) & 0xFF]);
+                    Logger.info('[ZLIB] uncompress: ' + sourceLen + ' → ' + outLen + ' bytes');
+                    return 0; // Z_OK
+                } catch(e) {
+                    Logger.error('[ZLIB] uncompress exception: ' + e.message);
+                    return -3; // Z_DATA_ERROR
+                }
+            },
+
+            // inflate(strm, flush) → Z_OK(0), Z_STREAM_END(1), or error
+            // z_stream ARM layout (all 4 bytes, little-endian):
+            //   +0x00 next_in, +0x04 avail_in, +0x08 total_in
+            //   +0x0C next_out, +0x10 avail_out, +0x14 total_out
+            //   +0x18 msg, +0x1C state
+            'inflate': function(emu, args) {
+                var strmPtr = args[0], flush = args[1];
+                try {
+                    if (!strmPtr) return -2; // Z_STREAM_ERROR
+                    var self = AndroidShims;
+                    // Read z_stream fields
+                    var next_in  = self._readU32(emu, strmPtr + 0x00);
+                    var avail_in = self._readU32(emu, strmPtr + 0x04);
+                    var next_out = self._readU32(emu, strmPtr + 0x0C);
+                    var avail_out= self._readU32(emu, strmPtr + 0x10);
+
+                    if (!next_in || !avail_in || !next_out || !avail_out) return -5; // Z_BUF_ERROR
+
+                    // Read all available input
+                    var input = emu.mem_read(next_in, avail_in);
+
+                    // Get or create pako Inflate instance for this stream
+                    if (!self._zlibStreams) self._zlibStreams = new Map();
+                    var statePtr = self._readU32(emu, strmPtr + 0x1C);
+                    var streamKey = strmPtr; // use z_stream address as key
+
+                    var inflator = self._zlibStreams.get(streamKey);
+                    if (!inflator) {
+                        // Create new inflate instance — try raw mode first
+                        inflator = { chunks: [], done: false, rawMode: false };
+                        // We'll do one-shot decompression per call since we have all input
+                        self._zlibStreams.set(streamKey, inflator);
+                    }
+
+                    // One-shot decompression of available input
+                    var decompressed;
+                    try {
+                        decompressed = pako.inflate(new Uint8Array(input));
+                    } catch(e1) {
+                        try {
+                            decompressed = pako.inflateRaw(new Uint8Array(input));
+                        } catch(e2) {
+                            Logger.warn('[ZLIB] inflate failed: ' + e1.message);
+                            return -3; // Z_DATA_ERROR
+                        }
+                    }
+
+                    // Write as much output as fits
+                    var outLen = Math.min(decompressed.length, avail_out);
+                    emu.mem_write(next_out, Array.from(decompressed.subarray(0, outLen)));
+
+                    // Update z_stream fields
+                    var consumed = avail_in; // consumed all input
+                    var writeU32 = function(addr, val) {
+                        emu.mem_write(addr, [val & 0xFF, (val >> 8) & 0xFF, (val >> 16) & 0xFF, (val >> 24) & 0xFF]);
+                    };
+                    writeU32(strmPtr + 0x00, next_in + consumed);   // next_in
+                    writeU32(strmPtr + 0x04, 0);                     // avail_in = 0
+                    writeU32(strmPtr + 0x08, self._readU32(emu, strmPtr + 0x08) + consumed); // total_in
+                    writeU32(strmPtr + 0x0C, next_out + outLen);     // next_out
+                    writeU32(strmPtr + 0x10, avail_out - outLen);    // avail_out
+                    writeU32(strmPtr + 0x14, self._readU32(emu, strmPtr + 0x14) + outLen);   // total_out
+
+                    Logger.info('[ZLIB] inflate: in=' + consumed + ' out=' + outLen + ' (total decompressed=' + decompressed.length + ')');
+                    return (outLen >= decompressed.length) ? 1 : 0; // Z_STREAM_END or Z_OK
+                } catch(e) {
+                    Logger.error('[ZLIB] inflate exception: ' + e.message);
+                    return -3;
+                }
+            },
+
+            // inflateInit2_(strm, windowBits, version, stream_size) → Z_OK(0)
+            'inflateInit2_': function(emu, args) {
+                var strmPtr = args[0], windowBits = args[1];
+                Logger.info('[ZLIB] inflateInit2_: strm=0x' + (strmPtr>>>0).toString(16) + ' windowBits=' + ((windowBits << 0) >> 0));
+                if (!AndroidShims._zlibStreams) AndroidShims._zlibStreams = new Map();
+                AndroidShims._zlibStreams.set(strmPtr, { windowBits: (windowBits << 0) >> 0, initialized: true });
+                return 0; // Z_OK
+            },
+
+            // inflateInit_(strm, version, stream_size) → Z_OK(0)
+            'inflateInit_': function(emu, args) {
+                var strmPtr = args[0];
+                Logger.info('[ZLIB] inflateInit_: strm=0x' + (strmPtr>>>0).toString(16));
+                if (!AndroidShims._zlibStreams) AndroidShims._zlibStreams = new Map();
+                AndroidShims._zlibStreams.set(strmPtr, { windowBits: 15, initialized: true });
+                return 0; // Z_OK
+            },
+
+            'inflateEnd': function(emu, args) {
+                var strmPtr = args[0];
+                if (AndroidShims._zlibStreams) AndroidShims._zlibStreams.delete(strmPtr);
+                return 0; // Z_OK
+            },
+
+            'inflateReset': function(emu, args) {
+                var strmPtr = args[0];
+                if (AndroidShims._zlibStreams) {
+                    var info = AndroidShims._zlibStreams.get(strmPtr);
+                    if (info) info.done = false;
+                }
+                return 0; // Z_OK
+            },
+
+            // Deflate stubs (not needed for loading, keep as no-ops)
             'deflate':       function(emu, args) { return 0; },
             'deflateInit_':  function(emu, args) { return 0; },
             'deflateInit2_': function(emu, args) { return 0; },
@@ -2160,8 +2306,31 @@ const AndroidShims = {
             'compressBound': function(emu, args) { return (args[0] || 0) + 128; },
             'compress':      function(emu, args) { return 0; },
             'compress2':     function(emu, args) { return 0; },
-            'uncompress':    function(emu, args) { return 0; },
-            'crc32':         function(emu, args) { return 0; },
+
+            // crc32(crc, buf, len) → updated CRC
+            'crc32': function(emu, args) {
+                var crc = args[0], buf = args[1], len = args[2];
+                if (!buf || !len) return 0;
+                try {
+                    var data = emu.mem_read(buf, len);
+                    // CRC32 implementation
+                    var table = AndroidShims._crc32Table;
+                    if (!table) {
+                        table = new Uint32Array(256);
+                        for (var i = 0; i < 256; i++) {
+                            var c = i;
+                            for (var j = 0; j < 8; j++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+                            table[i] = c;
+                        }
+                        AndroidShims._crc32Table = table;
+                    }
+                    crc = (crc ^ 0xFFFFFFFF) >>> 0;
+                    for (var k = 0; k < data.length; k++) {
+                        crc = (table[(crc ^ data[k]) & 0xFF] ^ (crc >>> 8)) >>> 0;
+                    }
+                    return (crc ^ 0xFFFFFFFF) >>> 0;
+                } catch(e) { return 0; }
+            },
 
             // ============================================
             // OpenAL Audio (no-op)

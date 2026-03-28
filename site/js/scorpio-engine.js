@@ -195,19 +195,87 @@ class ScorpioEngine {
         this.emu.mem_write(this.BASE + 0x12C36C0, NOP);
         Logger.success('v21: NOP\'d render gate checks at +0x12C36B4/+0x12C36C0');
 
-        // v33: Patch conditional REVNE (byte-swap) to unconditional REV in BGrm reader.
-        // The BGrm format is big-endian, ARM is little-endian. The game has endianness
-        // fields at object+0x10/+0x14 that control conditional byte-swaps. These fields
-        // are uninitialized (both 0), so the swap never executes → magic check fails.
-        // Fix: make all 3 REVNE instructions unconditional (change condition 0x1→0xE).
-        // REVNE = xx 0f bf 16 → REV = xx 0f bf e6
-        this.emu.mem_write(this.BASE + 0x12DE2B0, [0x30, 0x0f, 0xbf, 0xe6]); // REVNE R0,R0 → REV R0,R0
-        this.emu.mem_write(this.BASE + 0x12DE508, [0x31, 0x1f, 0xbf, 0xe6]); // REVNE R1,R1 → REV R1,R1
-        this.emu.mem_write(this.BASE + 0x12DE548, [0x31, 0x1f, 0xbf, 0xe6]); // REVNE R1,R1 → REV R1,R1
-        // v33e: Also patch conditional REV16 (16-bit byte-swap) for uint16 header values
-        this.emu.mem_write(this.BASE + 0x12DE588, [0xb1, 0x1f, 0xbf, 0xe6]); // REV16NE R1,R1 → REV16 R1,R1
-        this.emu.mem_write(this.BASE + 0x12DE5C8, [0xb1, 0x1f, 0xbf, 0xe6]); // REV16NE R1,R1 → REV16 R1,R1
-        Logger.success('v33: Patched 3 REVNE→REV + 2 REV16NE→REV16 in BGrm reader');
+        // v35: Comprehensive endianness fix — scan entire binary for ALL conditional
+        // REV/REV16 instructions and patch them to unconditional. The game uses
+        // conditional byte-swap instructions (REVNE, REVLS, REVCC, REVGE, REVCS)
+        // throughout BGrm, BTP, and other parsers. The endianness detection fields
+        // are both 0 (uninitialized), so conditions like NE are never satisfied and
+        // byte-swaps never execute. Fix: make them ALL unconditional (cond→AL=0xE).
+        var revPatched = 0;
+        var lsrPatched = 0;
+        var bnePatched = 0;
+        // Scan raw binary for conditional REV/REV16/RBIT instructions
+        // ARM encoding: cond 0110 1011 1111 Rd 1111 xx11 Rm
+        //   REV:  byte[0]&0xF0=0x30, byte[1]&0x0F=0x0F, byte[2]=0xBF, byte[3]&0x0F=0x06
+        //   REV16: byte[0]&0xF0=0xB0, same pattern
+        for (var fi = 0; fi < u8.length - 3; fi += 4) {
+            var b0 = u8[fi], b1 = u8[fi+1], b2 = u8[fi+2], b3 = u8[fi+3];
+            var cond = (b3 >> 4) & 0xF;
+            // Skip unconditional (0xE=AL) and NV (0xF)
+            if (cond >= 0xE) continue;
+            // Check REV pattern: byte[2]=0xBF, byte[3]&0x0F=0x06, byte[1]&0x0F=0x0F
+            if (b2 === 0xBF && (b3 & 0x0F) === 0x06 && (b1 & 0x0F) === 0x0F) {
+                var isREV = (b0 & 0xF0) === 0x30;
+                var isREV16 = (b0 & 0xF0) === 0xB0;
+                if (isREV || isREV16) {
+                    // Find which segment this file offset belongs to
+                    for (var si = 0; si < this.elf.segments.length; si++) {
+                        var seg = this.elf.segments[si];
+                        if (seg.type !== 1) continue;
+                        if (fi >= seg.offset && fi < seg.offset + seg.filesz) {
+                            var memAddr = this.BASE + seg.vaddr + (fi - seg.offset);
+                            var patched = [b0, b1, b2, (0xE0 | (b3 & 0x0F))];
+                            this.emu.mem_write(memAddr, patched);
+                            // Also patch shadow map
+                            var shadowAddr = seg.vaddr + (fi - seg.offset);
+                            try { this.emu.mem_write(shadowAddr, patched); } catch(e) {}
+                            revPatched++;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        // Also scan for conditional LSR #16 (16-bit swap pattern: REV Rx,Ry + CMP + LSRcond Rd,Rx,#16)
+        // ARM MOV Rd,Rm,LSR #16: byte[2]=0xA0, byte[3]&0x0F=0x01, byte[1]&0x0F=0x08, byte[0]&0x70=0x20
+        for (var fi = 0; fi < u8.length - 3; fi += 4) {
+            var b0 = u8[fi], b1 = u8[fi+1], b2 = u8[fi+2], b3 = u8[fi+3];
+            var cond = (b3 >> 4) & 0xF;
+            if (cond >= 0xE) continue;
+            if (b2 === 0xA0 && (b3 & 0x0F) === 0x01 && (b1 & 0x0F) === 0x08 && (b0 & 0x70) === 0x20 && (b0 & 0x80) === 0x00) {
+                // Verify it's preceded by a REV (any condition) within 3 instructions
+                if (fi >= 12) {
+                    var hasREV = false;
+                    for (var lookBack = 1; lookBack <= 3; lookBack++) {
+                        var lbOff = fi - lookBack * 4;
+                        if (lbOff >= 0 && u8[lbOff+2] === 0xBF && (u8[lbOff+3] & 0x0F) === 0x06 &&
+                            (u8[lbOff] & 0xF0) === 0x30 && (u8[lbOff+1] & 0x0F) === 0x0F) {
+                            hasREV = true; break;
+                        }
+                    }
+                    if (hasREV) {
+                        for (var si = 0; si < this.elf.segments.length; si++) {
+                            var seg = this.elf.segments[si];
+                            if (seg.type !== 1) continue;
+                            if (fi >= seg.offset && fi < seg.offset + seg.filesz) {
+                                var memAddr = this.BASE + seg.vaddr + (fi - seg.offset);
+                                var patched = [b0, b1, b2, (0xE0 | (b3 & 0x0F))];
+                                this.emu.mem_write(memAddr, patched);
+                                try { this.emu.mem_write(seg.vaddr + (fi - seg.offset), patched); } catch(e) {}
+                                lsrPatched++;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // Scan for conditional BNE/BEQ that guard endianness swap blocks
+        // Pattern: CMP Rx,#0 + BNE/BEQ → B (unconditional) near REV instructions
+        // The v33h patch had one at 0x12DE1A4 — keep it as specific patch
+        this.emu.mem_write(this.BASE + 0x12DE1A4, [0x08, 0x00, 0x00, 0xea]); // BNE→B (BGrm swap block)
+        bnePatched = 1;
+        Logger.success('v35: Patched ' + revPatched + ' conditional REV/REV16 + ' + lsrPatched + ' conditional LSR#16 + ' + bnePatched + ' BNE (endianness byte-swap fix)');
 
         // Map stack
         this.emu.mem_map(this.STACK, this.STACK_SIZE, uc.PROT_ALL);
@@ -427,6 +495,7 @@ class ScorpioEngine {
             var cookie = args[0]; // fd number stored in FILE._cookie
             var buf = args[1];
             var count = args[2];
+            // (diagnostic removed)
             if (!self.vfs || cookie < 100) return 0;
             var handle = self.vfs._handles ? self.vfs._handles.get(cookie) : null;
             if (!handle) return 0;
@@ -464,6 +533,7 @@ class ScorpioEngine {
             var cookie = args[0];
             var offset = args[1] | 0; // signed
             var whence = args[2];
+            // (diagnostic removed)
             if (!self.vfs || cookie < 100) return -1;
             var handle = self.vfs._handles ? self.vfs._handles.get(cookie) : null;
             if (!handle) return -1;
@@ -869,32 +939,6 @@ class ScorpioEngine {
         // Hook: intercept execution at shim addresses
         this.emu.hook_add(uc.HOOK_CODE, function(addr, size) {
             self.totalInstructions++;
-
-            // v33f: Targeted ARM trace for BGrm 16-bit reads
-            if (self._traceBGrmParse && addr >= self.BASE && addr < (self.BASE + (self.elf ? self.elf.mapSize : 0x2000000))) {
-                if (self._traceBGrmCount < self._traceBGrmMax) {
-                    self._traceBGrmCount++;
-                    var tr0 = self._readReg(uc.ARM_REG_R0);
-                    var tr1 = self._readReg(uc.ARM_REG_R1);
-                    var tr2 = self._readReg(uc.ARM_REG_R2);
-                    var tr3 = self._readReg(uc.ARM_REG_R3);
-                    var trSP = self._readReg(uc.ARM_REG_SP);
-                    var trLR = self._readReg(uc.ARM_REG_LR);
-                    var off = addr - self.BASE;
-                    var ib; try { ib = self.emu.mem_read(addr, 4); } catch(e) { ib = [0,0,0,0]; }
-                    Logger.info('[v33f-ARM] #' + self._traceBGrmCount +
-                        ' +0x' + off.toString(16) +
-                        ' [' + Array.from(ib).map(function(b){return b.toString(16).padStart(2,'0');}).join('') + ']' +
-                        ' R0=0x' + (tr0>>>0).toString(16) +
-                        ' R1=0x' + (tr1>>>0).toString(16) +
-                        ' R2=0x' + (tr2>>>0).toString(16) +
-                        ' R3=0x' + (tr3>>>0).toString(16) +
-                        ' SP=0x' + (trSP>>>0).toString(16) +
-                        ' LR=0x' + (trLR>>>0).toString(16));
-                } else {
-                    self._traceBGrmParse = false;
-                }
-            }
 
             // v31: Intercept patched SVC instructions (bionic syscalls)
             if (self._svcAddresses && self._svcAddresses.has(addr)) {

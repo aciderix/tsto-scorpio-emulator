@@ -388,6 +388,29 @@ class JNIBridge {
                             }
                             strCount++;
                         }
+                        // v35: Dump FILE struct state for open files
+                        if (window._filePtrToFd && window._filePtrToFd.size > 0) {
+                            Logger.warn('[v35] Open FILE handles (' + window._filePtrToFd.size + '):');
+                            for (var entry of window._filePtrToFd) {
+                                var fp = entry[0], fdx = entry[1];
+                                try {
+                                    var fpBytes = emu.mem_read(fp, 24);
+                                    var curP = (fpBytes[0] | (fpBytes[1]<<8) | (fpBytes[2]<<16) | (fpBytes[3]<<24)) >>> 0;
+                                    var curR = (fpBytes[4] | (fpBytes[5]<<8) | (fpBytes[6]<<16) | (fpBytes[7]<<24)) >>> 0;
+                                    var bfBase = (fpBytes[16] | (fpBytes[17]<<8) | (fpBytes[18]<<16) | (fpBytes[19]<<24)) >>> 0;
+                                    var bfSize = (fpBytes[20] | (fpBytes[21]<<8) | (fpBytes[22]<<16) | (fpBytes[23]<<24)) >>> 0;
+                                    var consumed = (curP - bfBase) >>> 0;
+                                    Logger.warn('  FILE*=0x' + fp.toString(16) + ' fd=' + fdx +
+                                        ' _p=0x' + curP.toString(16) + ' _r=' + curR +
+                                        ' base=0x' + bfBase.toString(16) + ' size=' + bfSize +
+                                        ' consumed=' + consumed);
+                                } catch(e2) {
+                                    Logger.warn('  FILE*=0x' + fp.toString(16) + ' fd=' + fdx + ' ERROR: ' + e2);
+                                }
+                            }
+                        } else {
+                            Logger.warn('[v35] No open FILE handles (all closed or map unavailable)');
+                        }
                         // Dump recent shim calls from engine
                         if (self.engine && self.engine._recentShimCalls) {
                             Logger.warn('[v32] === RECENT SHIM CALLS before *NO TEXT POOL* ===');

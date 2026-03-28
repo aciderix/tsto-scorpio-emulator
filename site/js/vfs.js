@@ -521,10 +521,14 @@ class VirtualFS {
                     continue;
                 }
                 var buffer = await resp.arrayBuffer();
+
+                // v35: Do NOT decompress data blob ZIPs — the BGrm reader has built-in
+                // ZIP handling (inflate/uncompress) and expects the raw ZIP format.
+
                 this.addAssetFile(assetPath, buffer);
                 loaded++;
                 totalBytes += buffer.byteLength;
-                
+
                 // Log progress for large files
                 var sizeMB = (buffer.byteLength / 1048576).toFixed(1);
                 Logger.info('[VFS] ✅ [' + (i+1) + '/' + assetFiles.length + '] ' + assetPath + ' (' + sizeMB + ' MB)');
