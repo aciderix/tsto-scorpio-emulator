@@ -1137,6 +1137,30 @@ class ScorpioEngine {
         results.push(this.callFunction('Java_com_ea_simpsons_ScorpioJNI_LifecycleOnCreate',
             this.jni.prepareCall('LifecycleOnCreate'), true));
 
+        // v31: Signal DLC downloads complete BEFORE LifecycleStart.
+        // On Android, the Java BackgroundDownloader calls downloadComplete(localDir, url) for each
+        // finished DLC package. The native code records these locations and uses them during
+        // LifecycleStart to find text pools and other resources. Without this, the game can't
+        // find DLC packages and shows *NO TEXT POOL*.
+        if (this.dlcLoader && this.dlcLoader.loadedDirs.size > 0) {
+            var dlcLocation = '/data/data/com.ea.game.simpsons4_row/files/';
+            Logger.info('v31: Signaling ' + this.dlcLoader.loadedDirs.size + ' DLC downloads complete BEFORE LifecycleStart');
+            for (var dlcDir of this.dlcLoader.loadedDirs) {
+                // The game uses DLCLocation + localDir for the full path.
+                // localDir from manifest is like "textpools-en", so full path is DLCLocation + localDir
+                var fullPath = dlcLocation + dlcDir;
+                var localDirStr = this.jni._allocString(fullPath);
+                var urlStr = this.jni._allocString('');
+                Logger.info('v31: downloadComplete("' + fullPath + '")');
+                results.push(this.callFunction('Java_com_ea_simpsons_BackgroundDownloaderJava_downloadComplete', {
+                    r0: this.jni.JNIENV_BASE,
+                    r1: this.jni.JOBJECT_BASE,
+                    r2: localDirStr,
+                    r3: urlStr,
+                }, true));
+            }
+        }
+
         // Step 7: Lifecycle.Start
         Logger.info('Step 7/9: Lifecycle.Start');
         results.push(this.callFunction('Java_com_ea_simpsons_ScorpioJNI_LifecycleStart',
@@ -1164,14 +1188,7 @@ class ScorpioEngine {
         // On real Android, the Java activity drives boot sequence by calling these JNI methods.
         // The native code waits for these callbacks to proceed with networking.
 
-        // 1. Signal DLC download complete (the game expects Java side to manage DLC)
-        Logger.info('Step 9a/11: downloadComplete callback');
-        results.push(this.callFunction('Java_com_ea_simpsons_BackgroundDownloaderJava_downloadComplete', {
-            r0: this.jni.JNIENV_BASE,
-            r1: this.jni.JOBJECT_BASE,
-            r2: 1,  // success = true
-            r3: 0,  // downloadId = 0
-        }, true));
+        // v31: downloadComplete calls moved BEFORE LifecycleStart (step 7) above.
 
         // 2. Set server time (the Java activity gets this from system clock)
         var serverTime = Math.floor(Date.now() / 1000);
