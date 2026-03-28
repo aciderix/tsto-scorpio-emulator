@@ -1300,12 +1300,56 @@ const AndroidShims = {
                 var fd = filePtr;
                 if (self._filePtrToFd && self._filePtrToFd.has(filePtr)) {
                     fd = self._filePtrToFd.get(filePtr);
-                    self._filePtrToFd.delete(filePtr);
-                    // Free the file data buffer
+
+                    // v33: Diagnostic - read FILE struct state before freeing
                     if (self._filePtrBufs && self._filePtrBufs.has(filePtr)) {
+                        var bufBase = self._filePtrBufs.get(filePtr);
+                        try {
+                            var pBytes = emu.mem_read(filePtr, 4);
+                            var currentP = (pBytes[0] | (pBytes[1]<<8) | (pBytes[2]<<16) | (pBytes[3]<<24)) >>> 0;
+                            var rBytes = emu.mem_read(filePtr + 4, 4);
+                            var currentR = (rBytes[0] | (rBytes[1]<<8) | (rBytes[2]<<16) | (rBytes[3]<<24)) >>> 0;
+                            var bytesConsumed = (currentP - bufBase) >>> 0;
+                            var handle = self.vfs ? self.vfs._handles.get(fd) : null;
+                            var vfsPos = handle ? handle.pos : -1;
+                            var vfsSize = handle ? handle.size : -1;
+                            var path = handle ? handle.path : '?';
+                            Logger.warn('[v33-fclose] FILE*=0x' + filePtr.toString(16) +
+                                ' fd=' + fd + ' path=' + path +
+                                ' bufBase=0x' + bufBase.toString(16) +
+                                ' _p=0x' + currentP.toString(16) +
+                                ' _r=' + currentR +
+                                ' bytesConsumed=' + bytesConsumed +
+                                ' vfsPos=' + vfsPos + '/' + vfsSize);
+                            // Dump the first 64 bytes of the buffer to see what the game read
+                            if (bytesConsumed > 0 && bytesConsumed <= 256) {
+                                var dumpLen = Math.min(bytesConsumed + 16, 64);
+                                var preview = emu.mem_read(bufBase, dumpLen);
+                                Logger.warn('[v33-fclose] Buffer[0..' + dumpLen + ']: ' +
+                                    Array.from(preview).map(function(b) { return b.toString(16).padStart(2,'0'); }).join(' '));
+                                // Show ASCII
+                                var ascii = '';
+                                for (var ai = 0; ai < preview.length; ai++) {
+                                    ascii += (preview[ai] >= 32 && preview[ai] < 127) ? String.fromCharCode(preview[ai]) : '.';
+                                }
+                                Logger.warn('[v33-fclose] ASCII: ' + ascii);
+                            }
+                            // If bytesConsumed is exactly 4, game only read magic bytes
+                            if (bytesConsumed === 4) {
+                                Logger.warn('[v33-fclose] ONLY 4 bytes consumed (magic "BGrm") - game rejected file immediately after magic check!');
+                                // Dump bytes 4-16 to see what the game WOULD have read next
+                                var nextBytes = emu.mem_read(bufBase + 4, 16);
+                                Logger.warn('[v33-fclose] Bytes[4..20] (unread): ' +
+                                    Array.from(nextBytes).map(function(b) { return b.toString(16).padStart(2,'0'); }).join(' '));
+                            }
+                        } catch(e) {
+                            Logger.warn('[v33-fclose] Error reading FILE struct: ' + e);
+                        }
+
                         self.free(self._filePtrBufs.get(filePtr));
                         self._filePtrBufs.delete(filePtr);
                     }
+                    self._filePtrToFd.delete(filePtr);
                     self.free(filePtr); // free the FILE struct
                 }
                 if (self.vfs && fd >= 100) {
