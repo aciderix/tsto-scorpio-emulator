@@ -246,6 +246,9 @@ class ScorpioEngine {
         // Apply PLT/GOT relocations
         this._applyRelocations();
 
+        // v31: Patch SVC syscall instructions so we can intercept file I/O
+        this._patchSVCInstructions();
+
         // Add hooks
         this._setupHooks();
 
@@ -564,6 +567,279 @@ class ScorpioEngine {
     }
 
     /**
+     * v31: Scan binary for SVC #0 instructions (ARM syscalls) and replace with NOPs.
+     * Bionic's internal open/stat/etc use SVC which Unicorn can't handle natively.
+     * We record SVC addresses and handle them in HOOK_CODE.
+     */
+    _patchSVCInstructions() {
+        this._svcAddresses = new Set();
+        var patchCount = 0;
+        var armNOP = [0x00, 0x00, 0xA0, 0xE1]; // MOV R0, R0 (NOP)
+
+        for (var seg of this.elf.segments) {
+            if (seg.type !== 1) continue; // PT_LOAD only
+            if (!(seg.flags & 1)) continue; // PF_X (executable) only
+
+            var segStart = this.BASE + seg.vaddr;
+            var segEnd = segStart + seg.filesz;
+
+            // Read segment from emulator in chunks to scan for SVC
+            var SCAN_CHUNK = 256 * 1024;
+            for (var off = 0; off < seg.filesz; off += SCAN_CHUNK) {
+                var chunkSize = Math.min(SCAN_CHUNK, seg.filesz - off);
+                // Ensure 4-byte alignment for full instruction scan
+                chunkSize = chunkSize & ~3;
+                if (chunkSize <= 0) continue;
+
+                var memAddr = segStart + off;
+                var data;
+                try { data = this.emu.mem_read(memAddr, chunkSize); } catch(e) { continue; }
+
+                for (var i = 0; i < chunkSize; i += 4) {
+                    // ARM SVC encoding: cond 1111 imm24
+                    // byte[3] = cond:4 | 0xF:4, so (byte[3] & 0x0F) == 0x0F
+                    // Exclude cond=1111 (0xFF prefix = unconditional extension, not SVC)
+                    if ((data[i + 3] & 0x0F) === 0x0F && (data[i + 3] & 0xF0) !== 0xF0) {
+                        var addr = memAddr + i;
+                        this._svcAddresses.add(addr);
+                        try { this.emu.mem_write(addr, armNOP); } catch(e) {}
+                        patchCount++;
+                    }
+                }
+            }
+        }
+
+        // Also patch shadow map at VA 0
+        if (patchCount > 0) {
+            for (var addr of this._svcAddresses) {
+                var shadowAddr = addr - this.BASE;
+                if (shadowAddr >= 0 && shadowAddr < this.elf.mapSize) {
+                    try { this.emu.mem_write(shadowAddr, armNOP); } catch(e) {}
+                }
+            }
+        }
+
+        Logger.info('v31: Patched ' + patchCount + ' SVC instructions for syscall interception');
+    }
+
+    /**
+     * v31: Read a null-terminated C string from emulator memory.
+     */
+    _readCStringFromEmu(addr, maxLen) {
+        maxLen = maxLen || 512;
+        if (!addr || addr === 0) return '';
+        try {
+            var bytes = this.emu.mem_read(addr, maxLen);
+            var len = 0;
+            while (len < bytes.length && bytes[len] !== 0) len++;
+            var arr = [];
+            for (var i = 0; i < len; i++) arr.push(bytes[i]);
+            return String.fromCharCode.apply(null, arr);
+        } catch(e) { return ''; }
+    }
+
+    /**
+     * v31: Handle an intercepted SVC syscall.
+     * Called from HOOK_CODE when PC matches a patched SVC address.
+     */
+    _handleSVC() {
+        var r7 = this._readReg(uc.ARM_REG_R7);
+        var r0 = this._readReg(uc.ARM_REG_R0);
+        var r1 = this._readReg(uc.ARM_REG_R1);
+        var r2 = this._readReg(uc.ARM_REG_R2);
+        var r3 = this._readReg(uc.ARM_REG_R3);
+        var result = -38; // -ENOSYS default
+
+        switch (r7) {
+            case 5: { // __NR_open
+                var path = this._readCStringFromEmu(r0);
+                var flags = r1;
+                Logger.info('[SVC] open("' + path + '", 0x' + (flags>>>0).toString(16) + ')');
+                if (this.vfs && this.vfs.exists(path)) {
+                    var fd = this.vfs.fopen(path, 'r');
+                    if (fd) {
+                        Logger.info('[SVC] open HIT: ' + path + ' → fd=' + fd);
+                        result = fd;
+                    } else {
+                        result = -2; // -ENOENT
+                    }
+                } else {
+                    Logger.info('[SVC] open MISS: ' + path);
+                    result = -2; // -ENOENT
+                }
+                break;
+            }
+            case 322: { // __NR_openat
+                // R0=dirfd, R1=pathname, R2=flags, R3=mode
+                var path = this._readCStringFromEmu(r1);
+                var flags = r2;
+                Logger.info('[SVC] openat("' + path + '", 0x' + (flags>>>0).toString(16) + ')');
+                if (this.vfs && this.vfs.exists(path)) {
+                    var fd = this.vfs.fopen(path, 'r');
+                    if (fd) {
+                        Logger.info('[SVC] openat HIT: ' + path + ' → fd=' + fd);
+                        result = fd;
+                    } else {
+                        result = -2;
+                    }
+                } else {
+                    Logger.info('[SVC] openat MISS: ' + path);
+                    result = -2;
+                }
+                break;
+            }
+            case 6: { // __NR_close
+                var fd = r0;
+                if (this.vfs && fd >= 100) {
+                    this.vfs.fclose(fd);
+                }
+                result = 0;
+                break;
+            }
+            case 3: { // __NR_read
+                var fd = r0;
+                var buf = r1;
+                var count = r2;
+                if (this.vfs && fd >= 100) {
+                    var handle = this.vfs._handles ? this.vfs._handles.get(fd) : null;
+                    if (handle) {
+                        var avail = handle.size - handle.pos;
+                        var toRead = Math.min(count, avail);
+                        if (toRead > 0) {
+                            var data = Array.from(handle.data.slice(handle.pos, handle.pos + toRead));
+                            try { this.emu.mem_write(buf, data); } catch(e) { toRead = -5; }
+                            if (toRead > 0) handle.pos += toRead;
+                        }
+                        result = toRead;
+                    } else {
+                        result = -9; // -EBADF
+                    }
+                } else {
+                    result = -9;
+                }
+                break;
+            }
+            case 4: { // __NR_write
+                result = r2; // pretend we wrote all bytes
+                break;
+            }
+            case 19: { // __NR_lseek
+                var fd = r0;
+                var offset = r1 | 0; // signed
+                var whence = r2;
+                if (this.vfs && fd >= 100) {
+                    this.vfs.fseek(fd, offset, whence);
+                    result = this.vfs.ftell(fd);
+                } else {
+                    result = -9;
+                }
+                break;
+            }
+            case 195: { // __NR_stat64
+                var path = this._readCStringFromEmu(r0);
+                var statbuf = r1;
+                if (this.vfs && this.vfs.exists(path)) {
+                    var size = this.vfs.fileSize(path);
+                    if (statbuf && size >= 0) {
+                        try {
+                            var zeros = new Array(128).fill(0);
+                            this.emu.mem_write(statbuf, zeros);
+                            var mode = 0x8000 | 0x1B4;
+                            this.emu.mem_write(statbuf + 8, [mode & 0xFF, (mode >> 8) & 0xFF, 0, 0]);
+                            this.emu.mem_write(statbuf + 44, [
+                                size & 0xFF, (size >> 8) & 0xFF,
+                                (size >> 16) & 0xFF, (size >> 24) & 0xFF
+                            ]);
+                        } catch(e) {}
+                    }
+                    result = 0;
+                } else {
+                    result = -2;
+                }
+                break;
+            }
+            case 197: { // __NR_fstat64
+                var fd = r0;
+                var statbuf = r1;
+                if (this.vfs && fd >= 100) {
+                    var handle = this.vfs._handles ? this.vfs._handles.get(fd) : null;
+                    if (handle && statbuf) {
+                        try {
+                            var zeros = new Array(128).fill(0);
+                            this.emu.mem_write(statbuf, zeros);
+                            var mode = 0x8000 | 0x1B4;
+                            this.emu.mem_write(statbuf + 8, [mode & 0xFF, (mode >> 8) & 0xFF, 0, 0]);
+                            this.emu.mem_write(statbuf + 44, [
+                                handle.size & 0xFF, (handle.size >> 8) & 0xFF,
+                                (handle.size >> 16) & 0xFF, (handle.size >> 24) & 0xFF
+                            ]);
+                        } catch(e) {}
+                        result = 0;
+                    } else {
+                        result = -9;
+                    }
+                } else {
+                    result = -9;
+                }
+                break;
+            }
+            case 33: { // __NR_access
+                var path = this._readCStringFromEmu(r0);
+                if (this.vfs && this.vfs.exists(path)) {
+                    result = 0;
+                } else {
+                    // Check if directory exists in VFS
+                    if (this.vfs) {
+                        var dirPath = path ? path.replace(/\/+$/, '') + '/' : '';
+                        var normalized = this.vfs._normalizePath(dirPath);
+                        var found = false;
+                        for (var entry of this.vfs._files) {
+                            if (entry[0].indexOf(normalized) === 0) { found = true; break; }
+                        }
+                        if (found) { result = 0; break; }
+                    }
+                    result = -2;
+                }
+                break;
+            }
+            case 140: { // __NR_llseek
+                // R0=fd, R1=offset_high, R2=offset_low, R3=result_ptr, [SP]=whence
+                var fd = r0;
+                var offsetLow = r2;
+                var resultPtr = r3;
+                if (this.vfs && fd >= 100) {
+                    // Read whence from stack
+                    var sp = this._readReg(uc.ARM_REG_SP);
+                    var whenceBytes;
+                    try { whenceBytes = this.emu.mem_read(sp, 4); } catch(e) { whenceBytes = [0,0,0,0]; }
+                    var whence = whenceBytes[0] | (whenceBytes[1] << 8) | (whenceBytes[2] << 16) | (whenceBytes[3] << 24);
+                    this.vfs.fseek(fd, offsetLow, whence);
+                    var pos = this.vfs.ftell(fd);
+                    // Write 64-bit result
+                    if (resultPtr) {
+                        try {
+                            this.emu.mem_write(resultPtr, [
+                                pos & 0xFF, (pos >> 8) & 0xFF, (pos >> 16) & 0xFF, (pos >> 24) & 0xFF,
+                                0, 0, 0, 0 // high 32 bits = 0
+                            ]);
+                        } catch(e) {}
+                    }
+                    result = 0;
+                } else {
+                    result = -9;
+                }
+                break;
+            }
+            default:
+                // Unknown syscall — return -ENOSYS
+                result = -38;
+                break;
+        }
+
+        this._writeReg(uc.ARM_REG_R0, result >>> 0);
+    }
+
+    /**
      * Setup Unicorn hooks
      * v12.0: Generic return stub now sets R0=0
      */
@@ -573,6 +849,12 @@ class ScorpioEngine {
         // Hook: intercept execution at shim addresses
         this.emu.hook_add(uc.HOOK_CODE, function(addr, size) {
             self.totalInstructions++;
+
+            // v31: Intercept patched SVC instructions (bionic syscalls)
+            if (self._svcAddresses && self._svcAddresses.has(addr)) {
+                self._handleSVC();
+                return;
+            }
 
             // PC sampling every 100K instructions
             if (self.totalInstructions % self._pcSampleInterval === 0) {
