@@ -846,6 +846,10 @@ class ScorpioEngine {
     _setupHooks() {
         var self = this;
 
+        // v32: Ring buffer of recent shim calls for diagnostics
+        this._recentShimCalls = [];
+        this._recentShimCallsMax = 50;
+
         // Hook: intercept execution at shim addresses
         this.emu.hook_add(uc.HOOK_CODE, function(addr, size) {
             self.totalInstructions++;
@@ -891,6 +895,18 @@ class ScorpioEngine {
                             mem: ''
                         });
                     }
+                    // v32: Record in recent shim calls ring buffer
+                    var lr = self._readReg(uc.ARM_REG_LR);
+                    self._recentShimCalls.push({
+                        name: handler.name,
+                        insn: self.totalInstructions,
+                        lr: lr,
+                        r0: r0, r1: r1, r2: r2, r3: r3
+                    });
+                    if (self._recentShimCalls.length > self._recentShimCallsMax) {
+                        self._recentShimCalls.shift();
+                    }
+
                     var result = handler.handler(self.emu, [r0, r1, r2, r3]);
                     if (result !== undefined && result !== null) {
                         self._writeReg(uc.ARM_REG_R0, result >>> 0);
@@ -1447,6 +1463,26 @@ class ScorpioEngine {
         Logger.info('Step 7/9: Lifecycle.Start');
         results.push(this.callFunction('Java_com_ea_simpsons_ScorpioJNI_LifecycleStart',
             this.jni.prepareCall('LifecycleStart'), true));
+
+        // v32: Also call downloadComplete AFTER LifecycleStart.
+        // LifecycleStart may initialize the DLC manager that downloadComplete needs.
+        // On real Android, downloadComplete can arrive at any time from the download thread.
+        if (this.dlcLoader && this.dlcLoader.loadedDirs.size > 0) {
+            var dlcLocation2 = '/data/data/com.ea.game.simpsons4_row/files/';
+            Logger.info('v32: Re-signaling ' + this.dlcLoader.loadedDirs.size + ' DLC downloads complete AFTER LifecycleStart');
+            for (var dlcDir of this.dlcLoader.loadedDirs) {
+                var fullPath2 = dlcLocation2 + dlcDir;
+                var localDirStr2 = this.jni._allocString(fullPath2);
+                var urlStr2 = this.jni._allocString('');
+                Logger.info('v32: downloadComplete("' + fullPath2 + '") [post-LifecycleStart]');
+                results.push(this.callFunction('Java_com_ea_simpsons_BackgroundDownloaderJava_downloadComplete', {
+                    r0: this.jni.JNIENV_BASE,
+                    r1: this.jni.JOBJECT_BASE,
+                    r2: localDirStr2,
+                    r3: urlStr2,
+                }, true));
+            }
+        }
 
         // Step 8: Lifecycle.Resume
         Logger.info('Step 8/9: Lifecycle.Resume');

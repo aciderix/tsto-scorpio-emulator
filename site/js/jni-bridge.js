@@ -358,12 +358,50 @@ class JNIBridge {
                 if (name === 'closeApp') {
                     Logger.warn('[JNI] closeApp intercepted — game wants to quit, ignoring');
                 }
-                // Intercept showDialog — log the dialog text
+                // v32: Intercept showDialog — read va_list args properly
                 if (name === 'showDialog') {
-                    // args[3..5] are jstring pointers for title, message, button
-                    var title = self._strings.get(args[3]) || '?';
-                    var msg = self._strings.get(args[4]) || '?';
+                    // CallStaticVoidMethodV: args = [env, class, methodID, va_list]
+                    // va_list points to 3 jstring values on the stack
+                    var vaPtr = args[3];
+                    var titleHandle = 0, msgHandle = 0, btnHandle = 0;
+                    try {
+                        titleHandle = self._readU32Emu(emu, vaPtr);
+                        msgHandle = self._readU32Emu(emu, vaPtr + 4);
+                        btnHandle = self._readU32Emu(emu, vaPtr + 8);
+                    } catch(e) {}
+                    var title = self._strings.get(titleHandle) || self._strings.get(args[3]) || '?';
+                    var msg = self._strings.get(msgHandle) || self._strings.get(args[4]) || '?';
                     Logger.warn('[JNI] showDialog: title="' + title + '" msg="' + msg + '"');
+
+                    // v32: If NO TEXT POOL, dump recent shim calls for diagnosis
+                    if (title.indexOf('TEXT POOL') >= 0 || msg.indexOf('TEXT POOL') >= 0 ||
+                        title === '?' || msg === '?') {
+                        Logger.warn('[JNI] showDialog handles: title=0x' + (titleHandle>>>0).toString(16) +
+                            ' msg=0x' + (msgHandle>>>0).toString(16) + ' btn=0x' + (btnHandle>>>0).toString(16));
+                        Logger.warn('[JNI] showDialog va_list at 0x' + (vaPtr>>>0).toString(16));
+                        // Dump all string handles for debugging
+                        Logger.warn('[JNI] String table (' + self._strings.size + ' entries):');
+                        var strCount = 0;
+                        for (var entry of self._strings) {
+                            if (strCount < 30) {
+                                Logger.warn('  0x' + (entry[0]>>>0).toString(16) + ' → "' + entry[1].substring(0, 50) + '"');
+                            }
+                            strCount++;
+                        }
+                        // Dump recent shim calls from engine
+                        if (self.engine && self.engine._recentShimCalls) {
+                            Logger.warn('[v32] === RECENT SHIM CALLS before *NO TEXT POOL* ===');
+                            for (var i = 0; i < self.engine._recentShimCalls.length; i++) {
+                                var call = self.engine._recentShimCalls[i];
+                                Logger.warn('  [' + i + '] ' + call.name + ' insn=' + call.insn +
+                                    ' LR=0x' + (call.lr>>>0).toString(16) +
+                                    ' R0=0x' + (call.r0>>>0).toString(16) +
+                                    ' R1=0x' + (call.r1>>>0).toString(16) +
+                                    ' R2=0x' + (call.r2>>>0).toString(16) +
+                                    ' R3=0x' + (call.r3>>>0).toString(16));
+                            }
+                        }
+                    }
                 }
                 return 0;
             } },
