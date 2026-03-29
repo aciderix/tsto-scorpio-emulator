@@ -2203,61 +2203,81 @@ const AndroidShims = {
                 try {
                     if (!strmPtr) return -2; // Z_STREAM_ERROR
                     var self = AndroidShims;
+                    if (!self._zlibStreams) self._zlibStreams = new Map();
+                    var streamInfo = self._zlibStreams.get(strmPtr);
+
                     // Read z_stream fields
                     var next_in  = self._readU32(emu, strmPtr + 0x00);
                     var avail_in = self._readU32(emu, strmPtr + 0x04);
                     var next_out = self._readU32(emu, strmPtr + 0x0C);
                     var avail_out= self._readU32(emu, strmPtr + 0x10);
 
-                    if (!next_in || !avail_in || !next_out || !avail_out) return -5; // Z_BUF_ERROR
+                    var writeU32 = function(addr, val) {
+                        emu.mem_write(addr, [val & 0xFF, (val >> 8) & 0xFF, (val >> 16) & 0xFF, (val >> 24) & 0xFF]);
+                    };
+
+                    // If we have buffered output from a previous decompression, deliver it
+                    if (streamInfo && streamInfo.buffer && streamInfo.bufferPos < streamInfo.buffer.length) {
+                        var remaining = streamInfo.buffer.length - streamInfo.bufferPos;
+                        var outLen = Math.min(remaining, avail_out);
+                        emu.mem_write(next_out, Array.from(streamInfo.buffer.subarray(streamInfo.bufferPos, streamInfo.bufferPos + outLen)));
+                        streamInfo.bufferPos += outLen;
+
+                        writeU32(strmPtr + 0x0C, next_out + outLen);
+                        writeU32(strmPtr + 0x10, avail_out - outLen);
+                        writeU32(strmPtr + 0x14, self._readU32(emu, strmPtr + 0x14) + outLen);
+
+                        var done = (streamInfo.bufferPos >= streamInfo.buffer.length);
+                        Logger.info('[ZLIB] inflate(buffered): out=' + outLen + ' remaining=' + (streamInfo.buffer.length - streamInfo.bufferPos) + (done ? ' DONE' : ''));
+                        return done ? 1 : 0; // Z_STREAM_END or Z_OK
+                    }
+
+                    if (!next_out || !avail_out) return -5; // Z_BUF_ERROR
+                    if (!next_in || !avail_in) return -5; // Z_BUF_ERROR
 
                     // Read all available input
                     var input = emu.mem_read(next_in, avail_in);
 
-                    // Get or create pako Inflate instance for this stream
-                    if (!self._zlibStreams) self._zlibStreams = new Map();
-                    var statePtr = self._readU32(emu, strmPtr + 0x1C);
-                    var streamKey = strmPtr; // use z_stream address as key
-
-                    var inflator = self._zlibStreams.get(streamKey);
-                    if (!inflator) {
-                        // Create new inflate instance — try raw mode first
-                        inflator = { chunks: [], done: false, rawMode: false };
-                        // We'll do one-shot decompression per call since we have all input
-                        self._zlibStreams.set(streamKey, inflator);
-                    }
-
-                    // One-shot decompression of available input
+                    // Determine decompression mode from windowBits
+                    var windowBits = (streamInfo && streamInfo.windowBits !== undefined) ? streamInfo.windowBits : 15;
                     var decompressed;
                     try {
-                        decompressed = pako.inflate(new Uint8Array(input));
+                        if (windowBits < 0) {
+                            decompressed = pako.inflateRaw(new Uint8Array(input));
+                        } else {
+                            decompressed = pako.inflate(new Uint8Array(input));
+                        }
                     } catch(e1) {
                         try {
-                            decompressed = pako.inflateRaw(new Uint8Array(input));
+                            decompressed = (windowBits < 0) ? pako.inflate(new Uint8Array(input)) : pako.inflateRaw(new Uint8Array(input));
                         } catch(e2) {
                             Logger.warn('[ZLIB] inflate failed: ' + e1.message);
                             return -3; // Z_DATA_ERROR
                         }
                     }
 
-                    // Write as much output as fits
+                    // Write as much output as fits in the output buffer
                     var outLen = Math.min(decompressed.length, avail_out);
                     emu.mem_write(next_out, Array.from(decompressed.subarray(0, outLen)));
 
-                    // Update z_stream fields
-                    var consumed = avail_in; // consumed all input
-                    var writeU32 = function(addr, val) {
-                        emu.mem_write(addr, [val & 0xFF, (val >> 8) & 0xFF, (val >> 16) & 0xFF, (val >> 24) & 0xFF]);
-                    };
-                    writeU32(strmPtr + 0x00, next_in + consumed);   // next_in
-                    writeU32(strmPtr + 0x04, 0);                     // avail_in = 0
-                    writeU32(strmPtr + 0x08, self._readU32(emu, strmPtr + 0x08) + consumed); // total_in
-                    writeU32(strmPtr + 0x0C, next_out + outLen);     // next_out
-                    writeU32(strmPtr + 0x10, avail_out - outLen);    // avail_out
-                    writeU32(strmPtr + 0x14, self._readU32(emu, strmPtr + 0x14) + outLen);   // total_out
+                    // Consume all input
+                    var consumed = avail_in;
+                    writeU32(strmPtr + 0x00, next_in + consumed);
+                    writeU32(strmPtr + 0x04, 0);
+                    writeU32(strmPtr + 0x08, self._readU32(emu, strmPtr + 0x08) + consumed);
+                    writeU32(strmPtr + 0x0C, next_out + outLen);
+                    writeU32(strmPtr + 0x10, avail_out - outLen);
+                    writeU32(strmPtr + 0x14, self._readU32(emu, strmPtr + 0x14) + outLen);
 
-                    Logger.info('[ZLIB] inflate: in=' + consumed + ' out=' + outLen + ' (total decompressed=' + decompressed.length + ')');
-                    return (outLen >= decompressed.length) ? 1 : 0; // Z_STREAM_END or Z_OK
+                    // Buffer remaining output for subsequent calls
+                    var done = (outLen >= decompressed.length);
+                    if (!done && streamInfo) {
+                        streamInfo.buffer = decompressed;
+                        streamInfo.bufferPos = outLen;
+                    }
+
+                    Logger.info('[ZLIB] inflate: in=' + consumed + ' out=' + outLen + '/' + decompressed.length + (done ? ' DONE' : ' (buffered ' + (decompressed.length - outLen) + ' remaining)'));
+                    return done ? 1 : 0; // Z_STREAM_END or Z_OK
                 } catch(e) {
                     Logger.error('[ZLIB] inflate exception: ' + e.message);
                     return -3;
@@ -2292,7 +2312,7 @@ const AndroidShims = {
                 var strmPtr = args[0];
                 if (AndroidShims._zlibStreams) {
                     var info = AndroidShims._zlibStreams.get(strmPtr);
-                    if (info) info.done = false;
+                    if (info) { info.buffer = null; info.bufferPos = 0; }
                 }
                 return 0; // Z_OK
             },

@@ -195,87 +195,22 @@ class ScorpioEngine {
         this.emu.mem_write(this.BASE + 0x12C36C0, NOP);
         Logger.success('v21: NOP\'d render gate checks at +0x12C36B4/+0x12C36C0');
 
-        // v35: Comprehensive endianness fix — scan entire binary for ALL conditional
-        // REV/REV16 instructions and patch them to unconditional. The game uses
-        // conditional byte-swap instructions (REVNE, REVLS, REVCC, REVGE, REVCS)
-        // throughout BGrm, BTP, and other parsers. The endianness detection fields
-        // are both 0 (uninitialized), so conditions like NE are never satisfied and
-        // byte-swaps never execute. Fix: make them ALL unconditional (cond→AL=0xE).
-        var revPatched = 0;
-        var lsrPatched = 0;
-        var bnePatched = 0;
-        // Scan raw binary for conditional REV/REV16/RBIT instructions
-        // ARM encoding: cond 0110 1011 1111 Rd 1111 xx11 Rm
-        //   REV:  byte[0]&0xF0=0x30, byte[1]&0x0F=0x0F, byte[2]=0xBF, byte[3]&0x0F=0x06
-        //   REV16: byte[0]&0xF0=0xB0, same pattern
-        for (var fi = 0; fi < u8.length - 3; fi += 4) {
-            var b0 = u8[fi], b1 = u8[fi+1], b2 = u8[fi+2], b3 = u8[fi+3];
-            var cond = (b3 >> 4) & 0xF;
-            // Skip unconditional (0xE=AL) and NV (0xF)
-            if (cond >= 0xE) continue;
-            // Check REV pattern: byte[2]=0xBF, byte[3]&0x0F=0x06, byte[1]&0x0F=0x0F
-            if (b2 === 0xBF && (b3 & 0x0F) === 0x06 && (b1 & 0x0F) === 0x0F) {
-                var isREV = (b0 & 0xF0) === 0x30;
-                var isREV16 = (b0 & 0xF0) === 0xB0;
-                if (isREV || isREV16) {
-                    // Find which segment this file offset belongs to
-                    for (var si = 0; si < this.elf.segments.length; si++) {
-                        var seg = this.elf.segments[si];
-                        if (seg.type !== 1) continue;
-                        if (fi >= seg.offset && fi < seg.offset + seg.filesz) {
-                            var memAddr = this.BASE + seg.vaddr + (fi - seg.offset);
-                            var patched = [b0, b1, b2, (0xE0 | (b3 & 0x0F))];
-                            this.emu.mem_write(memAddr, patched);
-                            // Also patch shadow map
-                            var shadowAddr = seg.vaddr + (fi - seg.offset);
-                            try { this.emu.mem_write(shadowAddr, patched); } catch(e) {}
-                            revPatched++;
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-        // Also scan for conditional LSR #16 (16-bit swap pattern: REV Rx,Ry + CMP + LSRcond Rd,Rx,#16)
-        // ARM MOV Rd,Rm,LSR #16: byte[2]=0xA0, byte[3]&0x0F=0x01, byte[1]&0x0F=0x08, byte[0]&0x70=0x20
-        for (var fi = 0; fi < u8.length - 3; fi += 4) {
-            var b0 = u8[fi], b1 = u8[fi+1], b2 = u8[fi+2], b3 = u8[fi+3];
-            var cond = (b3 >> 4) & 0xF;
-            if (cond >= 0xE) continue;
-            if (b2 === 0xA0 && (b3 & 0x0F) === 0x01 && (b1 & 0x0F) === 0x08 && (b0 & 0x70) === 0x20 && (b0 & 0x80) === 0x00) {
-                // Verify it's preceded by a REV (any condition) within 3 instructions
-                if (fi >= 12) {
-                    var hasREV = false;
-                    for (var lookBack = 1; lookBack <= 3; lookBack++) {
-                        var lbOff = fi - lookBack * 4;
-                        if (lbOff >= 0 && u8[lbOff+2] === 0xBF && (u8[lbOff+3] & 0x0F) === 0x06 &&
-                            (u8[lbOff] & 0xF0) === 0x30 && (u8[lbOff+1] & 0x0F) === 0x0F) {
-                            hasREV = true; break;
-                        }
-                    }
-                    if (hasREV) {
-                        for (var si = 0; si < this.elf.segments.length; si++) {
-                            var seg = this.elf.segments[si];
-                            if (seg.type !== 1) continue;
-                            if (fi >= seg.offset && fi < seg.offset + seg.filesz) {
-                                var memAddr = this.BASE + seg.vaddr + (fi - seg.offset);
-                                var patched = [b0, b1, b2, (0xE0 | (b3 & 0x0F))];
-                                this.emu.mem_write(memAddr, patched);
-                                try { this.emu.mem_write(seg.vaddr + (fi - seg.offset), patched); } catch(e) {}
-                                lsrPatched++;
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        // Scan for conditional BNE/BEQ that guard endianness swap blocks
-        // Pattern: CMP Rx,#0 + BNE/BEQ → B (unconditional) near REV instructions
-        // The v33h patch had one at 0x12DE1A4 — keep it as specific patch
-        this.emu.mem_write(this.BASE + 0x12DE1A4, [0x08, 0x00, 0x00, 0xea]); // BNE→B (BGrm swap block)
-        bnePatched = 1;
-        Logger.success('v35: Patched ' + revPatched + ' conditional REV/REV16 + ' + lsrPatched + ' conditional LSR#16 + ' + bnePatched + ' BNE (endianness byte-swap fix)');
+        // v36: Targeted endianness fix for BGrm header parsing.
+        //
+        // Root cause: BGrm::open creates a reader object on the stack. readU32/readU16
+        // check this+0x10 (platformEndian) vs this+0x14 (fileEndian) — if different,
+        // byte-swap via REVNE. Both default to 0 in our clean emulator stack, so the
+        // swap never fires. On real Android, the dirty stack gives a non-zero fileEndian.
+        //
+        // Fix: In BGrm::open at 0x12D2054, change "MOV R10, #0" to "MOV R10, #1".
+        // This sets platformEndian=1 for the BGrm header reader. Since fileEndian=0
+        // (uninitialized stack), 1≠0 triggers REVNE → correct BE→LE byte-swap.
+        // The data blob reader (created in a different function) keeps platformEndian=0
+        // and fileEndian=0, so no swap occurs for ZIP data (LE format) → PK magic works.
+        //
+        // 0x12D2054: e3a0a000 (MOV R10,#0) → e3a0a001 (MOV R10,#1)
+        this.emu.mem_write(this.BASE + 0x12D2054, [0x01, 0xa0, 0xa0, 0xe3]);
+        Logger.success('v36: Patched BGrm::open platformEndian=1 (targeted BE header byte-swap fix)');
 
         // Map stack
         this.emu.mem_map(this.STACK, this.STACK_SIZE, uc.PROT_ALL);
@@ -1537,6 +1472,17 @@ class ScorpioEngine {
         Logger.info('Step 6/9: Lifecycle.onCreate');
         results.push(this.callFunction('Java_com_ea_simpsons_ScorpioJNI_LifecycleOnCreate',
             this.jni.prepareCall('LifecycleOnCreate'), true));
+
+        // v36: Grant external storage permission.
+        // On real Android, Java calls WriteExternalStoragePermissionResult(env, obj, true)
+        // after the user grants permission. Without this, native code shows
+        // "External Storage Unavailable" dialog and blocks loading.
+        Logger.info('v36: Granting external storage permission');
+        results.push(this.callFunction('Java_com_ea_simpsons_ScorpioJNI_WriteExternalStoragePermissionResult', {
+            r0: this.jni.JNIENV_BASE,
+            r1: this.jni.JOBJECT_BASE,
+            r2: 1, // true = permission granted
+        }, true));
 
         // v31: Signal DLC downloads complete BEFORE LifecycleStart.
         // On Android, the Java BackgroundDownloader calls downloadComplete(localDir, url) for each
