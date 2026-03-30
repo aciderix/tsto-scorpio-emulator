@@ -1103,6 +1103,33 @@ class JNIBridge {
                 return this._allocString(value);
             }
 
+            // v34: Handle CreateNewStringUTFSafe(byte[]) → String
+            // The native code passes a byte array and expects a Java String back.
+            // Read the byte array data from the argument and convert to string.
+            if (name === 'CreateNewStringUTFSafe') {
+                var byteArrayRef = 0;
+                // For CallStaticObjectMethod: args = [env, clazz, mid, byteArray]
+                // For CallStaticObjectMethodV: args[3] may be va_list pointer
+                try {
+                    byteArrayRef = args[3];
+                    // If it looks like a va_list (stack pointer), dereference it
+                    if (byteArrayRef >= 0xF0000000) {
+                        var vaBytes = emu.mem_read(byteArrayRef, 4);
+                        byteArrayRef = (vaBytes[0] | (vaBytes[1] << 8) | (vaBytes[2] << 16) | (vaBytes[3] << 24)) >>> 0;
+                    }
+                } catch(e) {}
+                var str = '';
+                if (byteArrayRef && byteArrayRef > 0x1000) {
+                    try {
+                        // Try reading as a C-string from the byte array data
+                        str = this._readCString(emu, byteArrayRef);
+                    } catch(e) {}
+                }
+                if (!str) str = '';
+                this._logJNI('CallMethod→String', 'CreateNewStringUTFSafe → "' + str.substring(0, 60) + '"');
+                return this._allocString(str);
+            }
+
             // Default: return empty string (but log it for debugging)
             this._logJNI('CallMethod→String', name + ' → EMPTY (unhandled)');
             return this._emptyStr;

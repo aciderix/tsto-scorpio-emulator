@@ -1636,6 +1636,35 @@ class ScorpioEngine {
             this.emu.mem_write(GLOBAL_FLAG_ADDR, [1]);
             Logger.success('v22: engine-flag=1 (loading mode), D1B=0, D1C=1 → loading screen render path');
 
+            // === v34: Set loading state to prevent closeApp during first render ===
+            // The loading renderer at 0x12C2F34 checks a chain of singleton fields:
+            //   +0x1B0 (game state) → +0x1AC (BGCore ptr) → +0xD10 → +0xD4C
+            // When ALL are 0, it enters cleanup path → caller calls closeApp.
+            // Setting +0x1B0 = 1 makes the first check pass → loading screen renders.
+            this._writeU32ToEmu(singletonPtr + 0x1B0, 1);
+            Logger.success('v34: loading-state=1 at singleton+0x1B0 → prevents closeApp');
+
+            // v34: Verify/restore BGCore at singleton+0x1AC (native init may have cleared it)
+            var bgCoreCheck = this._readU32FromEmu(singletonPtr + 0x1AC);
+            if (!bgCoreCheck || bgCoreCheck === 0) {
+                var bgCS = 0x200;
+                var bgCP = AndroidShims.malloc(bgCS);
+                try { this.emu.mem_write(bgCP, new Array(bgCS).fill(0)); } catch(e) {}
+                var vtS = 64 * 4;
+                var vtP = AndroidShims.malloc(vtS);
+                var vtD = [];
+                for (var vti = 0; vti < 64; vti++) {
+                    var a = this.GENERIC_RETURN;
+                    vtD.push(a & 0xFF, (a >> 8) & 0xFF, (a >> 16) & 0xFF, (a >> 24) & 0xFF);
+                }
+                try { this.emu.mem_write(vtP, vtD); } catch(e) {}
+                this._writeU32ToEmu(bgCP, vtP);
+                this._writeU32ToEmu(singletonPtr + 0x1AC, bgCP);
+                Logger.success('v34: Re-allocated BGCore at 0x' + bgCP.toString(16) + ' → singleton+0x1AC');
+            } else {
+                Logger.success('v34: BGCore intact at 0x' + bgCoreCheck.toString(16));
+            }
+
             // === v23: PATCH ARM BINARY to hardcode singleton in dispatch ===
             // The dispatch at 0x12C30C4 reads a global pointer from VA 0x1A45728:
             //   LDR R0, [PC, #4]     ; load literal offset from 0x12C30D0
@@ -1778,6 +1807,8 @@ class ScorpioEngine {
             this.emu.mem_write(this.savedSingletonPtr + 0xD1C, [1]); // D1C = 1 → enter render body (BNE)
             this.emu.mem_write(this.savedSingletonPtr + 4, [1]);     // engine init = 1
             this.emu.mem_write(this.savedSingletonPtr + 5, [0]);     // no error
+            // v34: Maintain loading state to prevent closeApp
+            this._writeU32ToEmu(this.savedSingletonPtr + 0x1B0, 1); // loading state = 1
         }
         // Start function profiling for first few frames
         if (this._frameProfileCount < this._maxProfileFrames) {
@@ -1844,6 +1875,8 @@ class ScorpioEngine {
         // Previous write (in per-frame setup) gets cleared during OGLESRenderGLLoadingScreen ARM execution.
         if (this.savedSingletonPtr) {
             this._writeU32ToEmu(this.BASE + 0x1A45728, this.savedSingletonPtr);
+            // v34: Re-write loading state (ARM execution during LoadingScreen may clear it)
+            this._writeU32ToEmu(this.savedSingletonPtr + 0x1B0, 1);
         }
 
         var frameResult = this.callFunction('Java_com_bight_android_jni_BGCoreJNIBridge_OGLESRender',
