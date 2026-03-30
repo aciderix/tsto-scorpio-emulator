@@ -1,7 +1,7 @@
 {
   "name": "tsto-scorpio-emulator",
   "version": "15.5.0",
-  "description": "TSTO Scorpio Engine \u2014 ARM emulator in the browser via Unicorn.js + WebGL",
+  "description": "TSTO Scorpio Engine — ARM emulator in the browser via Unicorn.js + WebGL",
   "private": true,
   "scripts": {
     "deploy": "python3 scripts/deploy.py",
