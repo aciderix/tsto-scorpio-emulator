@@ -20,7 +20,7 @@ class ScorpioEngine {
         this.STACK = 0xF0000000;
         this.STACK_SIZE = 2 * 1024 * 1024;
         this.HEAP = 0xD0000000;
-        this.HEAP_SIZE = 32 * 1024 * 1024; // v15.3: increased from 4MB for game asset loading
+        this.HEAP_SIZE = 64 * 1024 * 1024; // v29: match AndroidShims._heapSize (64MB) — fixes QEMU section overflow from auto-mapping 0xD2000000+ pages
         this.SHIM_BASE = 0xE0000000;
         this.SHIM_SIZE = 0x100000;
         this.RETURN_SENTINEL = this.SHIM_BASE + this.SHIM_SIZE - 0x1000; // Dedicated stop address for emu_start
@@ -153,6 +153,34 @@ class ScorpioEngine {
         Logger.success('Binary loaded: ' + (totalWritten/1024/1024).toFixed(1) + ' MB via ' +
             this.elf.segments.filter(function(s){return s.type===1}).length + ' LOAD segments (with relocations)');
 
+        // v30: Shadow-map the binary at VA 0 (unrelocated address space)
+        // Some function/data pointers in the binary are unrelocated — they reference
+        // VA 0x100586 instead of BASE+0x100586. By mapping the relocated binary at VA 0,
+        // these unrelocated accesses transparently work (both code FETCH and data READ).
+        Logger.arm('v30: Shadow-mapping binary at VA 0 for unrelocated pointer support...');
+        try {
+            this.emu.mem_map(0, mapSize, uc.PROT_ALL);
+            this.memMapped += mapSize;
+            // Register these blocks with auto-mapper to prevent double-mapping
+            for (var soff = 0; soff < mapSize; soff += 0x100000) {
+                this._autoMapped.add(soff);
+            }
+            for (var seg of this.elf.segments) {
+                if (seg.type !== 1) continue;
+                for (var off = 0; off < seg.filesz; off += CHUNK) {
+                    var end = Math.min(off + CHUNK, seg.filesz);
+                    var filePos = seg.offset + off;
+                    var memAddr = seg.vaddr + off; // VA 0-based (no BASE)
+                    var chunk = Array.from(u8.slice(filePos, filePos + (end - off)));
+                    this.emu.mem_write(memAddr, chunk);
+                }
+            }
+            Logger.success('v30: Shadow binary mapped at 0x0-0x' + mapSize.toString(16) +
+                ' (' + (mapSize/1024/1024).toFixed(1) + ' MB)');
+        } catch(e) {
+            Logger.warn('v30: Shadow map failed: ' + e.message);
+        }
+
         // BSS
         for (var seg of this.elf.segments) {
             if (seg.type !== 1) continue;
@@ -166,6 +194,23 @@ class ScorpioEngine {
         this.emu.mem_write(this.BASE + 0x12C36B4, NOP);
         this.emu.mem_write(this.BASE + 0x12C36C0, NOP);
         Logger.success('v21: NOP\'d render gate checks at +0x12C36B4/+0x12C36C0');
+
+        // v36: Targeted endianness fix for BGrm header parsing.
+        //
+        // Root cause: BGrm::open creates a reader object on the stack. readU32/readU16
+        // check this+0x10 (platformEndian) vs this+0x14 (fileEndian) — if different,
+        // byte-swap via REVNE. Both default to 0 in our clean emulator stack, so the
+        // swap never fires. On real Android, the dirty stack gives a non-zero fileEndian.
+        //
+        // Fix: In BGrm::open at 0x12D2054, change "MOV R10, #0" to "MOV R10, #1".
+        // This sets platformEndian=1 for the BGrm header reader. Since fileEndian=0
+        // (uninitialized stack), 1≠0 triggers REVNE → correct BE→LE byte-swap.
+        // The data blob reader (created in a different function) keeps platformEndian=0
+        // and fileEndian=0, so no swap occurs for ZIP data (LE format) → PK magic works.
+        //
+        // 0x12D2054: e3a0a000 (MOV R10,#0) → e3a0a001 (MOV R10,#1)
+        this.emu.mem_write(this.BASE + 0x12D2054, [0x01, 0xa0, 0xa0, 0xe3]);
+        Logger.success('v36: Patched BGrm::open platformEndian=1 (targeted BE header byte-swap fix)');
 
         // Map stack
         this.emu.mem_map(this.STACK, this.STACK_SIZE, uc.PROT_ALL);
@@ -191,14 +236,37 @@ class ScorpioEngine {
             0x1E, 0xFF, 0x2F, 0xE1,  // BX LR
         ]);
 
+        // v30: FILE struct function pointer stubs as SHIM handlers
+        // Bionic's internal fwrite/fflush/fgetc call _read/_write/_close/_seek via
+        // function pointers in the FILE struct. These are registered as shim handlers
+        // so our JavaScript code can handle them properly with VFS access.
+        this.FILE_READ_STUB  = this.SHIM_BASE + 0xFD000;  // 0xE00FD000
+        this.FILE_WRITE_STUB = this.SHIM_BASE + 0xFD010;  // 0xE00FD010
+        this.FILE_CLOSE_STUB = this.SHIM_BASE + 0xFD020;  // 0xE00FD020
+        this.FILE_SEEK_STUB  = this.SHIM_BASE + 0xFD030;  // 0xE00FD030
+
+        // Write BX LR at each stub address (the shim handler does the real work)
+        var bxlr = [0x1E, 0xFF, 0x2F, 0xE1];
+        this.emu.mem_write(this.FILE_READ_STUB, bxlr);
+        this.emu.mem_write(this.FILE_WRITE_STUB, bxlr);
+        this.emu.mem_write(this.FILE_CLOSE_STUB, bxlr);
+        this.emu.mem_write(this.FILE_SEEK_STUB, bxlr);
+        Logger.info('[v30] FILE struct function stubs at 0x' +
+            this.FILE_READ_STUB.toString(16) + '-0x' + (this.FILE_SEEK_STUB + 4).toString(16));
+
         // Setup JNI environment (maps string heap + writes JNI structures)
         this.jni.setup(this.emu);
+        // v32: Back-reference for diagnostics
+        this.jni.engine = this;
 
         // Setup shims (Android + GL + JNI vtable handlers)
         this._setupShims();
 
         // Apply PLT/GOT relocations
         this._applyRelocations();
+
+        // v31: Patch SVC syscall instructions so we can intercept file I/O
+        this._patchSVCInstructions();
 
         // Add hooks
         this._setupHooks();
@@ -355,6 +423,72 @@ class ScorpioEngine {
         }
         Logger.info('  ' + vmCount + ' JavaVM vtable handlers registered');
 
+        // === v30: Register FILE struct callback handlers ===
+        // These handle bionic's internal _read/_write/_close/_seek calls on FILE*
+        // _read(cookie, buf, count) - cookie=fd, buf=dest, count=bytes to read
+        this.shimHandlers.set(this.FILE_READ_STUB, { name: 'FILE._read', handler: function(emu, args) {
+            var cookie = args[0]; // fd number stored in FILE._cookie
+            var buf = args[1];
+            var count = args[2];
+            // (diagnostic removed)
+            if (!self.vfs || cookie < 100) return 0;
+            var handle = self.vfs._handles ? self.vfs._handles.get(cookie) : null;
+            if (!handle) return 0;
+            var avail = handle.size - handle.pos;
+            var toRead = Math.min(count, avail);
+            if (toRead <= 0) return 0; // EOF
+            try {
+                var data = Array.from(handle.data.slice(handle.pos, handle.pos + toRead));
+                emu.mem_write(buf, data);
+                handle.pos += toRead;
+                if (self._fileReadLogCount === undefined) self._fileReadLogCount = 0;
+                self._fileReadLogCount++;
+                if (self._fileReadLogCount <= 30) {
+                    Logger.info('[FILE._read] fd=' + cookie + ' count=' + count + ' read=' + toRead + ' pos=' + handle.pos + '/' + handle.size);
+                }
+            } catch(e) { return 0; }
+            return toRead;
+        }});
+        // _write(cookie, buf, count) - pretend success
+        this.shimHandlers.set(this.FILE_WRITE_STUB, { name: 'FILE._write', handler: function(emu, args) {
+            return args[2]; // return count
+        }});
+        // _close(cookie) - cleanup
+        this.shimHandlers.set(this.FILE_CLOSE_STUB, { name: 'FILE._close', handler: function(emu, args) {
+            var cookie = args[0];
+            if (self._fileCloseLogCount === undefined) self._fileCloseLogCount = 0;
+            self._fileCloseLogCount++;
+            if (self._fileCloseLogCount <= 10) {
+                Logger.info('[FILE._close] fd=' + cookie);
+            }
+            return 0;
+        }});
+        // _seek(cookie, offset, whence) - bionic _seek: returns new position or -1
+        this.shimHandlers.set(this.FILE_SEEK_STUB, { name: 'FILE._seek', handler: function(emu, args) {
+            var cookie = args[0];
+            var offset = args[1] | 0; // signed
+            var whence = args[2];
+            // (diagnostic removed)
+            if (!self.vfs || cookie < 100) return -1;
+            var handle = self.vfs._handles ? self.vfs._handles.get(cookie) : null;
+            if (!handle) return -1;
+            var newPos;
+            if (whence === 0) newPos = offset; // SEEK_SET
+            else if (whence === 1) newPos = handle.pos + offset; // SEEK_CUR
+            else if (whence === 2) newPos = handle.size + offset; // SEEK_END
+            else return -1;
+            if (newPos < 0) newPos = 0;
+            if (newPos > handle.size) newPos = handle.size;
+            handle.pos = newPos;
+            if (self._fileSeekLogCount === undefined) self._fileSeekLogCount = 0;
+            self._fileSeekLogCount++;
+            if (self._fileSeekLogCount <= 30) {
+                Logger.info('[FILE._seek] fd=' + cookie + ' offset=' + offset + ' whence=' + whence + ' -> pos=' + newPos);
+            }
+            return newPos;
+        }});
+        Logger.info('  4 FILE struct callback handlers registered');
+
         Logger.info('  Total shim handlers: ' + this.shimHandlers.size);
     }
 
@@ -454,15 +588,298 @@ class ScorpioEngine {
     }
 
     /**
+     * v31: Scan binary for SVC #0 instructions (ARM syscalls) and replace with NOPs.
+     * Bionic's internal open/stat/etc use SVC which Unicorn can't handle natively.
+     * We record SVC addresses and handle them in HOOK_CODE.
+     */
+    _patchSVCInstructions() {
+        this._svcAddresses = new Set();
+        var patchCount = 0;
+        var armNOP = [0x00, 0x00, 0xA0, 0xE1]; // MOV R0, R0 (NOP)
+
+        for (var seg of this.elf.segments) {
+            if (seg.type !== 1) continue; // PT_LOAD only
+            if (!(seg.flags & 1)) continue; // PF_X (executable) only
+
+            var segStart = this.BASE + seg.vaddr;
+            var segEnd = segStart + seg.filesz;
+
+            // Read segment from emulator in chunks to scan for SVC
+            var SCAN_CHUNK = 256 * 1024;
+            for (var off = 0; off < seg.filesz; off += SCAN_CHUNK) {
+                var chunkSize = Math.min(SCAN_CHUNK, seg.filesz - off);
+                // Ensure 4-byte alignment for full instruction scan
+                chunkSize = chunkSize & ~3;
+                if (chunkSize <= 0) continue;
+
+                var memAddr = segStart + off;
+                var data;
+                try { data = this.emu.mem_read(memAddr, chunkSize); } catch(e) { continue; }
+
+                for (var i = 0; i < chunkSize; i += 4) {
+                    // Match EXACTLY: SVC #0 with AL condition = 0xEF000000
+                    // Little-endian bytes: [0x00, 0x00, 0x00, 0xEF]
+                    if (data[i] === 0x00 && data[i + 1] === 0x00 &&
+                        data[i + 2] === 0x00 && data[i + 3] === 0xEF) {
+                        var addr = memAddr + i;
+                        this._svcAddresses.add(addr);
+                        try { this.emu.mem_write(addr, armNOP); } catch(e) {}
+                        patchCount++;
+                    }
+                }
+            }
+        }
+
+        // Also patch shadow map at VA 0
+        if (patchCount > 0) {
+            for (var addr of this._svcAddresses) {
+                var shadowAddr = addr - this.BASE;
+                if (shadowAddr >= 0 && shadowAddr < this.elf.mapSize) {
+                    try { this.emu.mem_write(shadowAddr, armNOP); } catch(e) {}
+                }
+            }
+        }
+
+        Logger.info('v31: Patched ' + patchCount + ' SVC instructions for syscall interception');
+    }
+
+    /**
+     * v31: Read a null-terminated C string from emulator memory.
+     */
+    _readCStringFromEmu(addr, maxLen) {
+        maxLen = maxLen || 512;
+        if (!addr || addr === 0) return '';
+        try {
+            var bytes = this.emu.mem_read(addr, maxLen);
+            var len = 0;
+            while (len < bytes.length && bytes[len] !== 0) len++;
+            var arr = [];
+            for (var i = 0; i < len; i++) arr.push(bytes[i]);
+            return String.fromCharCode.apply(null, arr);
+        } catch(e) { return ''; }
+    }
+
+    /**
+     * v31: Handle an intercepted SVC syscall.
+     * Called from HOOK_CODE when PC matches a patched SVC address.
+     */
+    _handleSVC() {
+        var r7 = this._readReg(uc.ARM_REG_R7);
+        var r0 = this._readReg(uc.ARM_REG_R0);
+        var r1 = this._readReg(uc.ARM_REG_R1);
+        var r2 = this._readReg(uc.ARM_REG_R2);
+        var r3 = this._readReg(uc.ARM_REG_R3);
+        var result = -38; // -ENOSYS default
+
+        switch (r7) {
+            case 5: { // __NR_open
+                var path = this._readCStringFromEmu(r0);
+                var flags = r1;
+                Logger.info('[SVC] open("' + path + '", 0x' + (flags>>>0).toString(16) + ')');
+                if (this.vfs && this.vfs.exists(path)) {
+                    var fd = this.vfs.fopen(path, 'r');
+                    if (fd) {
+                        Logger.info('[SVC] open HIT: ' + path + ' → fd=' + fd);
+                        result = fd;
+                    } else {
+                        result = -2; // -ENOENT
+                    }
+                } else {
+                    Logger.info('[SVC] open MISS: ' + path);
+                    result = -2; // -ENOENT
+                }
+                break;
+            }
+            case 322: { // __NR_openat
+                // R0=dirfd, R1=pathname, R2=flags, R3=mode
+                var path = this._readCStringFromEmu(r1);
+                var flags = r2;
+                Logger.info('[SVC] openat("' + path + '", 0x' + (flags>>>0).toString(16) + ')');
+                if (this.vfs && this.vfs.exists(path)) {
+                    var fd = this.vfs.fopen(path, 'r');
+                    if (fd) {
+                        Logger.info('[SVC] openat HIT: ' + path + ' → fd=' + fd);
+                        result = fd;
+                    } else {
+                        result = -2;
+                    }
+                } else {
+                    Logger.info('[SVC] openat MISS: ' + path);
+                    result = -2;
+                }
+                break;
+            }
+            case 6: { // __NR_close
+                var fd = r0;
+                if (this.vfs && fd >= 100) {
+                    this.vfs.fclose(fd);
+                }
+                result = 0;
+                break;
+            }
+            case 3: { // __NR_read
+                var fd = r0;
+                var buf = r1;
+                var count = r2;
+                if (this.vfs && fd >= 100) {
+                    var handle = this.vfs._handles ? this.vfs._handles.get(fd) : null;
+                    if (handle) {
+                        var avail = handle.size - handle.pos;
+                        var toRead = Math.min(count, avail);
+                        if (toRead > 0) {
+                            var data = Array.from(handle.data.slice(handle.pos, handle.pos + toRead));
+                            try { this.emu.mem_write(buf, data); } catch(e) { toRead = -5; }
+                            if (toRead > 0) handle.pos += toRead;
+                        }
+                        result = toRead;
+                    } else {
+                        result = -9; // -EBADF
+                    }
+                } else {
+                    result = -9;
+                }
+                break;
+            }
+            case 4: { // __NR_write
+                result = r2; // pretend we wrote all bytes
+                break;
+            }
+            case 19: { // __NR_lseek
+                var fd = r0;
+                var offset = r1 | 0; // signed
+                var whence = r2;
+                if (this.vfs && fd >= 100) {
+                    this.vfs.fseek(fd, offset, whence);
+                    result = this.vfs.ftell(fd);
+                } else {
+                    result = -9;
+                }
+                break;
+            }
+            case 195: { // __NR_stat64
+                var path = this._readCStringFromEmu(r0);
+                var statbuf = r1;
+                if (this.vfs && this.vfs.exists(path)) {
+                    var size = this.vfs.fileSize(path);
+                    if (statbuf && size >= 0) {
+                        try {
+                            var zeros = new Array(128).fill(0);
+                            this.emu.mem_write(statbuf, zeros);
+                            var mode = 0x8000 | 0x1B4;
+                            this.emu.mem_write(statbuf + 8, [mode & 0xFF, (mode >> 8) & 0xFF, 0, 0]);
+                            this.emu.mem_write(statbuf + 44, [
+                                size & 0xFF, (size >> 8) & 0xFF,
+                                (size >> 16) & 0xFF, (size >> 24) & 0xFF
+                            ]);
+                        } catch(e) {}
+                    }
+                    result = 0;
+                } else {
+                    result = -2;
+                }
+                break;
+            }
+            case 197: { // __NR_fstat64
+                var fd = r0;
+                var statbuf = r1;
+                if (this.vfs && fd >= 100) {
+                    var handle = this.vfs._handles ? this.vfs._handles.get(fd) : null;
+                    if (handle && statbuf) {
+                        try {
+                            var zeros = new Array(128).fill(0);
+                            this.emu.mem_write(statbuf, zeros);
+                            var mode = 0x8000 | 0x1B4;
+                            this.emu.mem_write(statbuf + 8, [mode & 0xFF, (mode >> 8) & 0xFF, 0, 0]);
+                            this.emu.mem_write(statbuf + 44, [
+                                handle.size & 0xFF, (handle.size >> 8) & 0xFF,
+                                (handle.size >> 16) & 0xFF, (handle.size >> 24) & 0xFF
+                            ]);
+                        } catch(e) {}
+                        result = 0;
+                    } else {
+                        result = -9;
+                    }
+                } else {
+                    result = -9;
+                }
+                break;
+            }
+            case 33: { // __NR_access
+                var path = this._readCStringFromEmu(r0);
+                if (this.vfs && this.vfs.exists(path)) {
+                    result = 0;
+                } else {
+                    // Check if directory exists in VFS
+                    if (this.vfs) {
+                        var dirPath = path ? path.replace(/\/+$/, '') + '/' : '';
+                        var normalized = this.vfs._normalizePath(dirPath);
+                        var found = false;
+                        for (var entry of this.vfs._files) {
+                            if (entry[0].indexOf(normalized) === 0) { found = true; break; }
+                        }
+                        if (found) { result = 0; break; }
+                    }
+                    result = -2;
+                }
+                break;
+            }
+            case 140: { // __NR_llseek
+                // R0=fd, R1=offset_high, R2=offset_low, R3=result_ptr, [SP]=whence
+                var fd = r0;
+                var offsetLow = r2;
+                var resultPtr = r3;
+                if (this.vfs && fd >= 100) {
+                    // Read whence from stack
+                    var sp = this._readReg(uc.ARM_REG_SP);
+                    var whenceBytes;
+                    try { whenceBytes = this.emu.mem_read(sp, 4); } catch(e) { whenceBytes = [0,0,0,0]; }
+                    var whence = whenceBytes[0] | (whenceBytes[1] << 8) | (whenceBytes[2] << 16) | (whenceBytes[3] << 24);
+                    this.vfs.fseek(fd, offsetLow, whence);
+                    var pos = this.vfs.ftell(fd);
+                    // Write 64-bit result
+                    if (resultPtr) {
+                        try {
+                            this.emu.mem_write(resultPtr, [
+                                pos & 0xFF, (pos >> 8) & 0xFF, (pos >> 16) & 0xFF, (pos >> 24) & 0xFF,
+                                0, 0, 0, 0 // high 32 bits = 0
+                            ]);
+                        } catch(e) {}
+                    }
+                    result = 0;
+                } else {
+                    result = -9;
+                }
+                break;
+            }
+            default:
+                // Unknown syscall — return -ENOSYS
+                result = -38;
+                break;
+        }
+
+        this._writeReg(uc.ARM_REG_R0, result >>> 0);
+    }
+
+    /**
      * Setup Unicorn hooks
      * v12.0: Generic return stub now sets R0=0
      */
     _setupHooks() {
         var self = this;
 
+        // v32: Ring buffer of recent shim calls for diagnostics
+        this._recentShimCalls = [];
+        this._recentShimCallsMax = 50;
+
         // Hook: intercept execution at shim addresses
         this.emu.hook_add(uc.HOOK_CODE, function(addr, size) {
             self.totalInstructions++;
+
+            // v31: Intercept patched SVC instructions (bionic syscalls)
+            if (self._svcAddresses && self._svcAddresses.has(addr)) {
+                self._handleSVC();
+                return;
+            }
 
             // PC sampling every 100K instructions
             if (self.totalInstructions % self._pcSampleInterval === 0) {
@@ -499,6 +916,35 @@ class ScorpioEngine {
                             mem: ''
                         });
                     }
+                    // v32: Record in recent shim calls ring buffer
+                    var lr = self._readReg(uc.ARM_REG_LR);
+                    self._recentShimCalls.push({
+                        name: handler.name,
+                        insn: self.totalInstructions,
+                        lr: lr,
+                        r0: r0, r1: r1, r2: r2, r3: r3
+                    });
+                    if (self._recentShimCalls.length > self._recentShimCallsMax) {
+                        self._recentShimCalls.shift();
+                    }
+
+                    // v32: Log all shim calls during LifecycleStart for diagnostics
+                    if (self._logAllShimCalls && !handler.name.startsWith('__aeabi') &&
+                        handler.name !== 'memcpy' && handler.name !== 'memset' &&
+                        handler.name !== 'memmove' && handler.name !== 'strlen' &&
+                        handler.name !== 'strcmp' && handler.name !== 'strcpy' &&
+                        handler.name !== 'strncpy' && handler.name !== 'strncmp' &&
+                        handler.name !== 'memcmp' && handler.name !== 'strcat' &&
+                        handler.name !== 'strchr' && handler.name !== 'strrchr' &&
+                        handler.name !== 'strstr') {
+                        Logger.info('[v32-SHIM] ' + handler.name +
+                            ' LR=0x' + (lr>>>0).toString(16) +
+                            ' R0=0x' + (r0>>>0).toString(16) +
+                            ' R1=0x' + (r1>>>0).toString(16) +
+                            ' R2=0x' + (r2>>>0).toString(16) +
+                            ' R3=0x' + (r3>>>0).toString(16));
+                    }
+
                     var result = handler.handler(self.emu, [r0, r1, r2, r3]);
                     if (result !== undefined && result !== null) {
                         self._writeReg(uc.ARM_REG_R0, result >>> 0);
@@ -675,16 +1121,53 @@ class ScorpioEngine {
     }
 
     _handleUnmapped(type, addr, size) {
-        // v19: NULL function pointer call (FETCH below BASE)
-        // Instead of stopping, simulate "return 0" so execution continues.
-        // This handles uninitialized vtable entries in objects whose constructors
-        // hit missing dependencies. The caller gets R0=0 back and can check for failure.
+        // v30: Unrelocated function pointer redirect
+        // If FETCH targets addr below BASE but (BASE + addr) is within binary range,
+        // this is an unrelocated function pointer (missing R_ARM_RELATIVE).
+        // Redirect PC to the correct address instead of returning 0.
         if (type === 'fetch' && (addr >>> 0) < this.BASE) {
             var pc = this._readReg(uc.ARM_REG_PC);
             var lr = this._readReg(uc.ARM_REG_LR);
             var r0 = this._readReg(uc.ARM_REG_R0);
-            // Only auto-return if LR looks valid (inside binary or shim space)
             var lrUnsigned = lr >>> 0;
+
+            // v30: Check if this is an unrelocated binary address
+            var relocatedAddr = (this.BASE + addr) >>> 0;
+            var binaryEnd = (this.BASE + this.elf.mapSize) >>> 0;
+            if (addr > 0 && relocatedAddr >= this.BASE && relocatedAddr < binaryEnd) {
+                if (!this._unrelocRedirectCount) this._unrelocRedirectCount = 0;
+                this._unrelocRedirectCount++;
+                if (this._unrelocRedirectCount <= 20) {
+                    Logger.warn('[MEM] v30: Unrelocated function ptr 0x' + (addr>>>0).toString(16) +
+                        ' → redirecting to 0x' + relocatedAddr.toString(16) +
+                        ' (BASE+0x' + (addr>>>0).toString(16) + ') LR=0x' + lrUnsigned.toString(16));
+                }
+                // Map the page containing the unrelocated address (in case it's not mapped)
+                var CODE_BLOCK = 0x100000;
+                var aligned = addr & ~(CODE_BLOCK - 1);
+                if (!this._autoMapped.has(aligned)) {
+                    try {
+                        this.emu.mem_map(aligned, CODE_BLOCK, uc.PROT_ALL);
+                        this._autoMapped.add(aligned);
+                    } catch(e) {}
+                }
+                // Write a branch to the correct address at the target location
+                // ARM: LDR PC, [PC, #-4] followed by the target address
+                // This is a PC-relative load: when PC is at addr, it reads addr+8-4=addr+4
+                try {
+                    var b0 = relocatedAddr & 0xFF;
+                    var b1 = (relocatedAddr >> 8) & 0xFF;
+                    var b2 = (relocatedAddr >> 16) & 0xFF;
+                    var b3 = (relocatedAddr >> 24) & 0xFF;
+                    this.emu.mem_write(addr, [
+                        0x04, 0xF0, 0x1F, 0xE5,  // LDR PC, [PC, #-4]
+                        b0, b1, b2, b3            // target address
+                    ]);
+                } catch(e) {}
+                return true;  // let execution continue — will jump to correct address
+            }
+
+            // Genuine NULL function pointer (addr doesn't map to binary)
             if (lrUnsigned >= this.BASE || (lrUnsigned >= 0xe0000000 && lrUnsigned < 0xf0000000)) {
                 if (!this._nullPtrCount) this._nullPtrCount = 0;
                 this._nullPtrCount++;
@@ -693,20 +1176,28 @@ class ScorpioEngine {
                         ' — auto-return to LR=0x' + lrUnsigned.toString(16) +
                         ' R0=0x' + (r0>>>0).toString(16));
                 }
-                // Map the page so Unicorn doesn't fault, write a BX LR there
-                var aligned = addr & ~0xFFF;
+                // Map the page so Unicorn doesn't fault, fill entirely with BX LR
+                var CODE_BLOCK = 0x100000;
+                var aligned = addr & ~(CODE_BLOCK - 1);
                 if (!this._autoMapped.has(aligned)) {
                     try {
-                        this.emu.mem_map(aligned, 0x1000, uc.PROT_ALL);
+                        this.emu.mem_map(aligned, CODE_BLOCK, uc.PROT_ALL);
                         this._autoMapped.add(aligned);
+                        // Fill with MOV R0,#0; BX LR every 8 bytes
+                        var stub = [0x00, 0x00, 0xA0, 0xE3, 0x1E, 0xFF, 0x2F, 0xE1];
+                        var fill = [];
+                        for (var si = 0; si < 512; si++) {
+                            for (var sj = 0; sj < 8; sj++) fill.push(stub[sj]);
+                        }
+                        for (var off = 0; off < CODE_BLOCK; off += 4096) {
+                            this.emu.mem_write(aligned + off, fill);
+                        }
                     } catch(e) {}
                 }
-                // Write "MOV R0, #0; BX LR" at the target address
-                // MOV R0, #0 = 0xE3A00000, BX LR = 0xE12FFF1E
                 try {
                     this.emu.mem_write(addr, [0x00, 0x00, 0xA0, 0xE3, 0x1E, 0xFF, 0x2F, 0xE1]);
                 } catch(e) {}
-                return true;  // let execution continue into our stub
+                return true;
             }
             // LR not valid — hard stop
             Logger.error('[MEM] FETCH below BASE at 0x' + (addr>>>0).toString(16) +
@@ -717,12 +1208,28 @@ class ScorpioEngine {
             return false;
         }
 
-        var aligned = addr & ~0x3FFF;
+        // v29: Use 1MB blocks instead of 16KB to reduce QEMU section table fragmentation.
+        var AUTO_BLOCK = 0x100000; // 1MB
+        var aligned = addr & ~(AUTO_BLOCK - 1);
         if (!this._autoMapped.has(aligned)) {
             try {
-                this.emu.mem_map(aligned, 0x4000, uc.PROT_ALL);
+                this.emu.mem_map(aligned, AUTO_BLOCK, uc.PROT_ALL);
                 this._autoMapped.add(aligned);
-                this.memMapped += 0x4000;
+                this.memMapped += AUTO_BLOCK;
+
+                // v29d: Fill blocks below BASE with BX LR to prevent NOP-slide spin.
+                // Data auto-maps below BASE can later be executed if code jumps there
+                // via corrupted pointers. Without fill, the zeros decode as ANDEQ (NOP).
+                if ((aligned >>> 0) < this.BASE) {
+                    var stub = [0x00, 0x00, 0xA0, 0xE3, 0x1E, 0xFF, 0x2F, 0xE1]; // MOV R0,#0; BX LR
+                    var fill = [];
+                    for (var si = 0; si < 512; si++) {
+                        for (var sj = 0; sj < 8; sj++) fill.push(stub[sj]);
+                    }
+                    for (var off = 0; off < AUTO_BLOCK; off += 4096) {
+                        this.emu.mem_write(aligned + off, fill);
+                    }
+                }
 
                 if (this._unmappedAccessLog.length < this._maxUnmappedLog) {
                     var pc = this._readReg(uc.ARM_REG_PC);
@@ -791,8 +1298,10 @@ class ScorpioEngine {
         var startInsns = this.totalInstructions;
 
         try {
-            // v15.2: Init mode uses 2M (enough for shader loading), game frames use configurable limit
-            var maxInsns = initMode ? 2000000 : this.maxFrameInsns;
+            // v29: Init mode uses 100M — ScorpioJNI_init was hitting 20M cap without completing
+            // (R0=0x0 = incomplete). With QEMU section overflow fixed, init runs longer and needs
+            // more budget to fully initialize game state (singleton fields, threads, networking).
+            var maxInsns = initMode ? 100000000 : this.maxFrameInsns;
             // v17: Use RETURN_SENTINEL as stop address — distinct from GENERIC_RETURN
             var stopAddr = this.RETURN_SENTINEL;
             if (isThumb) {
@@ -808,7 +1317,7 @@ class ScorpioEngine {
             Logger.success(name + ': ' + insns + ' instructions, R0=0x' + (r0 >>> 0).toString(16));
 
             // If we hit the instruction limit, dump where we stopped (spin loop detection)
-            if (!initMode && insns >= maxInsns - 10) {
+            if (insns >= maxInsns - 10) {
                 var pcOffset = (endPC - this.BASE) >>> 0;
                 Logger.warn('[SPIN?] Execution stopped at PC=0x' + (endPC>>>0).toString(16) +
                     ' (BIN+0x' + pcOffset.toString(16) + ') LR=0x' + (endLR>>>0).toString(16));
@@ -912,11 +1421,12 @@ class ScorpioEngine {
 
         // === v18: Pre-allocate BGCore object for OGLESInit ===
         // OGLESInit reads ScorpioSingleton (VA 0x1A45728) → +0x1AC → BGCore object
-        // ScorpioJNI.init just created the singleton, but field +0x1AC (BGCore) is NULL
-        // We allocate a fake BGCore with a vtable pointing to GENERIC_RETURN
+        // If ScorpioJNI.init properly initialized, field +0x1AC may already be set.
+        // v30: Only pre-allocate if the field is still NULL.
         var SINGLETON_PTR_ADDR = this.BASE + 0x1A45728;
         var singletonPtr = this._readU32FromEmu(SINGLETON_PTR_ADDR);
-        if (singletonPtr && singletonPtr !== 0) {
+        var existingBGCore = singletonPtr ? this._readU32FromEmu(singletonPtr + 0x1AC) : 0;
+        if (singletonPtr && singletonPtr !== 0 && (!existingBGCore || existingBGCore === 0)) {
             // Allocate fake BGCore object (0x200 bytes)
             var bgCoreSize = 0x200;
             var bgCorePtr = AndroidShims.malloc(bgCoreSize);
@@ -939,6 +1449,8 @@ class ScorpioEngine {
             this._writeU32ToEmu(singletonPtr + 0x1AC, bgCorePtr);
             Logger.success('v18: Pre-allocated BGCore object at 0x' + bgCorePtr.toString(16) +
                 ' (vtable at 0x' + vtablePtr.toString(16) + ') → singleton+0x1AC');
+        } else if (existingBGCore && existingBGCore !== 0) {
+            Logger.success('v30: BGCore already initialized at 0x' + existingBGCore.toString(16) + ' — skipping pre-allocation');
         } else {
             Logger.warn('v18: Scorpio singleton still NULL after ScorpioJNI.init — BGCore NOT pre-allocated');
         }
@@ -961,10 +1473,68 @@ class ScorpioEngine {
         results.push(this.callFunction('Java_com_ea_simpsons_ScorpioJNI_LifecycleOnCreate',
             this.jni.prepareCall('LifecycleOnCreate'), true));
 
+        // v36: Grant external storage permission.
+        // On real Android, Java calls WriteExternalStoragePermissionResult(env, obj, true)
+        // after the user grants permission. Without this, native code shows
+        // "External Storage Unavailable" dialog and blocks loading.
+        Logger.info('v36: Granting external storage permission');
+        results.push(this.callFunction('Java_com_ea_simpsons_ScorpioJNI_WriteExternalStoragePermissionResult', {
+            r0: this.jni.JNIENV_BASE,
+            r1: this.jni.JOBJECT_BASE,
+            r2: 1, // true = permission granted
+        }, true));
+
+        // v31: Signal DLC downloads complete BEFORE LifecycleStart.
+        // On Android, the Java BackgroundDownloader calls downloadComplete(localDir, url) for each
+        // finished DLC package. The native code records these locations and uses them during
+        // LifecycleStart to find text pools and other resources. Without this, the game can't
+        // find DLC packages and shows *NO TEXT POOL*.
+        if (this.dlcLoader && this.dlcLoader.loadedDirs.size > 0) {
+            var dlcLocation = '/data/data/com.ea.game.simpsons4_row/files/';
+            Logger.info('v31: Signaling ' + this.dlcLoader.loadedDirs.size + ' DLC downloads complete BEFORE LifecycleStart');
+            for (var dlcDir of this.dlcLoader.loadedDirs) {
+                // The game uses DLCLocation + localDir for the full path.
+                // localDir from manifest is like "textpools-en", so full path is DLCLocation + localDir
+                var fullPath = dlcLocation + dlcDir;
+                var localDirStr = this.jni._allocString(fullPath);
+                var urlStr = this.jni._allocString('');
+                Logger.info('v31: downloadComplete("' + fullPath + '")');
+                results.push(this.callFunction('Java_com_ea_simpsons_BackgroundDownloaderJava_downloadComplete', {
+                    r0: this.jni.JNIENV_BASE,
+                    r1: this.jni.JOBJECT_BASE,
+                    r2: localDirStr,
+                    r3: urlStr,
+                }, true));
+            }
+        }
+
         // Step 7: Lifecycle.Start
         Logger.info('Step 7/9: Lifecycle.Start');
+        // v32: Enable full shim call logging during LifecycleStart for diagnostics
+        this._logAllShimCalls = true;
         results.push(this.callFunction('Java_com_ea_simpsons_ScorpioJNI_LifecycleStart',
             this.jni.prepareCall('LifecycleStart'), true));
+        this._logAllShimCalls = false;
+
+        // v32: Also call downloadComplete AFTER LifecycleStart.
+        // LifecycleStart may initialize the DLC manager that downloadComplete needs.
+        // On real Android, downloadComplete can arrive at any time from the download thread.
+        if (this.dlcLoader && this.dlcLoader.loadedDirs.size > 0) {
+            var dlcLocation2 = '/data/data/com.ea.game.simpsons4_row/files/';
+            Logger.info('v32: Re-signaling ' + this.dlcLoader.loadedDirs.size + ' DLC downloads complete AFTER LifecycleStart');
+            for (var dlcDir of this.dlcLoader.loadedDirs) {
+                var fullPath2 = dlcLocation2 + dlcDir;
+                var localDirStr2 = this.jni._allocString(fullPath2);
+                var urlStr2 = this.jni._allocString('');
+                Logger.info('v32: downloadComplete("' + fullPath2 + '") [post-LifecycleStart]');
+                results.push(this.callFunction('Java_com_ea_simpsons_BackgroundDownloaderJava_downloadComplete', {
+                    r0: this.jni.JNIENV_BASE,
+                    r1: this.jni.JOBJECT_BASE,
+                    r2: localDirStr2,
+                    r3: urlStr2,
+                }, true));
+            }
+        }
 
         // Step 8: Lifecycle.Resume
         Logger.info('Step 8/9: Lifecycle.Resume');
@@ -988,14 +1558,7 @@ class ScorpioEngine {
         // On real Android, the Java activity drives boot sequence by calling these JNI methods.
         // The native code waits for these callbacks to proceed with networking.
 
-        // 1. Signal DLC download complete (the game expects Java side to manage DLC)
-        Logger.info('Step 9a/11: downloadComplete callback');
-        results.push(this.callFunction('Java_com_ea_simpsons_BackgroundDownloaderJava_downloadComplete', {
-            r0: this.jni.JNIENV_BASE,
-            r1: this.jni.JOBJECT_BASE,
-            r2: 1,  // success = true
-            r3: 0,  // downloadId = 0
-        }, true));
+        // v31: downloadComplete calls moved BEFORE LifecycleStart (step 7) above.
 
         // 2. Set server time (the Java activity gets this from system clock)
         var serverTime = Math.floor(Date.now() / 1000);
@@ -1233,6 +1796,15 @@ class ScorpioEngine {
         this._pcSamples = {}; // reset PC sampling for this frame
         this._writeGenericReturnStub();
         this._writeReturnSentinelStub();
+
+        // v27: Execute any pending threads each frame (threads may be created during render)
+        if (AndroidShims._pendingThreads && AndroidShims._pendingThreads.length > 0) {
+            var threadCount = AndroidShims._pendingThreads.length;
+            var threadsRan = AndroidShims.runPendingThreads(5);
+            if (threadsRan > 0) {
+                Logger.info('[v27] Ran ' + threadsRan + '/' + threadCount + ' pending threads during frame');
+            }
+        }
 
         // v22: Call OGLESRenderGLLoadingScreen FIRST — this renders the loading/splash screen
         // while the scene graph is empty. Then also call OGLESRender for the main scene.

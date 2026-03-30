@@ -197,18 +197,47 @@ class DLCLoader {
             
             // Read header to get the exact local path
             let dlcSubDir = localDir;
+            let headerData = null;
             if (file0) {
                 try {
-                    const headerData = await file0.async('uint8array');
+                    headerData = await file0.async('uint8array');
                     dlcSubDir = this._parseBGrmHeader(headerData) || localDir;
                 } catch (e) {
                     Logger.warn('[DLC] Header parse failed, using: ' + localDir);
                 }
             }
-            
+
             // Extract inner ZIP
             const innerData = await file1.async('arraybuffer');
-            const innerZip = await JSZip.loadAsync(innerData);
+
+            // v31: Register the raw BGrm header (file "0") and data blob (file "1") in VFS.
+            // The game uses fopen to read these directly: <dlcDir>/0 = index, <dlcDir>/1 = data.
+            // On Android, EA's downloader stores these as individual files on disk.
+            if (headerData) {
+                var headerPath = localDir + '/0';
+                for (var base of this.gameBasePaths) {
+                    this.vfs.addFile(base + headerPath, headerData);
+                    this.vfs.addFile(base + 'dlc/' + headerPath, headerData);
+                }
+                this.vfs.addFile(headerPath, headerData);
+                this.vfs.addFile('/' + headerPath, headerData);
+                this.vfs.addFile('dlc/' + headerPath, headerData);
+                Logger.info('[DLC] v31: Registered BGrm header: ' + headerPath + ' (' + headerData.length + ' bytes)');
+            }
+            // v35: Do NOT decompress the data blob ZIP — the BGrm reader has built-in
+            // ZIP handling (inflate/uncompress). Pass raw ZIP data as file "1".
+            var rawBlob = new Uint8Array(innerData);
+            var innerZip = await JSZip.loadAsync(innerData);
+            Logger.info('[DLC] v35: Keeping raw ZIP blob for ' + localDir + ' (' + rawBlob.length + ' bytes)');
+            var blobPath = localDir + '/1';
+            for (var base of this.gameBasePaths) {
+                this.vfs.addFile(base + blobPath, rawBlob);
+                this.vfs.addFile(base + 'dlc/' + blobPath, rawBlob);
+            }
+            this.vfs.addFile(blobPath, rawBlob);
+            this.vfs.addFile('/' + blobPath, rawBlob);
+            this.vfs.addFile('dlc/' + blobPath, rawBlob);
+            Logger.info('[DLC] v31: Registered raw data blob: ' + blobPath + ' (' + rawBlob.length + ' bytes)');
             
             let filesExtracted = 0;
             const fileNames = Object.keys(innerZip.files);

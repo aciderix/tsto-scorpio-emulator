@@ -68,11 +68,12 @@ class JNIBridge {
             'CustomConfigBasicAuth': '',
             'ServerErrorReason': '',
             'DLCSecretKey': 'tapped_out_secret_key_2013',
+            'language': 'eng_us',
         };
 
         // Logging
         this._jniCallCounts = new Map();
-        this._maxLogPerFunc = 20; // v3.0: increased for debugging
+        this._maxLogPerFunc = 50; // v27: increased to capture boolean/void method calls
         this.callLog = [];
         this._verboseInit = true; // v3.0: verbose during init
     }
@@ -92,23 +93,18 @@ class JNIBridge {
 
         // Fill vtable with unique addresses per slot (for debugging unhandled JNI calls)
         // Each slot gets RETURN_STUB + slot*4 — all map to the same page with BX LR
-        this.JNI_STUB_BASE = 0xE0080000; // dedicated JNI stub page
-        try {
-            emu.mem_map(this.JNI_STUB_BASE, 0x1000, uc.PROT_ALL);
-            // Write MOV R0, #0; BX LR at each 8-byte aligned slot
-            for (var i = 0; i < 256; i++) {
-                var stubAddr = this.JNI_STUB_BASE + i * 8;
-                emu.mem_write(stubAddr, [
-                    0x00, 0x00, 0xA0, 0xE3,  // MOV R0, #0
-                    0x1E, 0xFF, 0x2F, 0xE1,  // BX LR
-                ]);
-                this._writeU32(this.JNIENV_VTABLE + i * 4, stubAddr);
-            }
-        } catch(e) {
-            // Fallback: use generic return stub
-            for (var i = 0; i < 256; i++) {
-                this._writeU32(this.JNIENV_VTABLE + i * 4, this.RETURN_STUB);
-            }
+        // v29: JNI_STUB_BASE is inside SHIM region (0xE0000000-0xE00FFFFF), already mapped.
+        // Previous code tried mem_map here → error 11 (overlap) → fell back to RETURN_STUB.
+        // Now we just write directly — no extra mem_map needed.
+        this.JNI_STUB_BASE = 0xE0080000;
+        // Write MOV R0, #0; BX LR at each 8-byte aligned slot
+        for (var i = 0; i < 256; i++) {
+            var stubAddr = this.JNI_STUB_BASE + i * 8;
+            emu.mem_write(stubAddr, [
+                0x00, 0x00, 0xA0, 0xE3,  // MOV R0, #0
+                0x1E, 0xFF, 0x2F, 0xE1,  // BX LR
+            ]);
+            this._writeU32(this.JNIENV_VTABLE + i * 4, stubAddr);
         }
 
         // JavaVM* → vtable
@@ -224,12 +220,9 @@ class JNIBridge {
             36: { name: 'CallObjectMethodA', handler: function(emu, args) { return self._handleCallMethod('Object', emu, args); } },
 
             // CallBooleanMethod (37-39)
-            37: { name: 'CallBooleanMethod', handler: function(emu, args) {
-                self._logJNI('CallBooleanMethod', 'obj=0x' + (args[1]>>>0).toString(16) + ' method=0x' + (args[2]>>>0).toString(16));
-                return 0;
-            }},
-            38: { name: 'CallBooleanMethodV', handler: function(emu, args) { return 0; } },
-            39: { name: 'CallBooleanMethodA', handler: function(emu, args) { return 0; } },
+            37: { name: 'CallBooleanMethod', handler: function(emu, args) { return self._handleBooleanMethod(emu, args); } },
+            38: { name: 'CallBooleanMethodV', handler: function(emu, args) { return self._handleBooleanMethod(emu, args); } },
+            39: { name: 'CallBooleanMethodA', handler: function(emu, args) { return self._handleBooleanMethod(emu, args); } },
 
             // CallIntMethod (49-51) - v3.0: return sensible values
             49: { name: 'CallIntMethod', handler: function(emu, args) {
@@ -317,9 +310,9 @@ class JNIBridge {
             114: { name: 'CallStaticObjectMethod', handler: function(emu, args) { return self._handleCallMethod('StaticObject', emu, args); } },
             115: { name: 'CallStaticObjectMethodV', handler: function(emu, args) { return self._handleCallMethod('StaticObject', emu, args); } },
             116: { name: 'CallStaticObjectMethodA', handler: function(emu, args) { return self._handleCallMethod('StaticObject', emu, args); } },
-            117: { name: 'CallStaticBooleanMethod', handler: function(emu, args) { return 0; } },
-            118: { name: 'CallStaticBooleanMethodV', handler: function(emu, args) { return 0; } },
-            119: { name: 'CallStaticBooleanMethodA', handler: function(emu, args) { return 0; } },
+            117: { name: 'CallStaticBooleanMethod', handler: function(emu, args) { return self._handleBooleanMethod(emu, args); } },
+            118: { name: 'CallStaticBooleanMethodV', handler: function(emu, args) { return self._handleBooleanMethod(emu, args); } },
+            119: { name: 'CallStaticBooleanMethodA', handler: function(emu, args) { return self._handleBooleanMethod(emu, args); } },
             120: { name: 'CallStaticByteMethod', handler: function(emu, args) { return 0; } },
             121: { name: 'CallStaticByteMethodV', handler: function(emu, args) { return 0; } },
             122: { name: 'CallStaticByteMethodA', handler: function(emu, args) { return 0; } },
@@ -356,7 +349,85 @@ class JNIBridge {
                 self._logJNI('CallStaticVoidMethod', 'class=0x' + (args[1]>>>0).toString(16) + ' method=0x' + (args[2]>>>0).toString(16));
                 return 0;
             }},
-            142: { name: 'CallStaticVoidMethodV', handler: function(emu, args) { return 0; } },
+            142: { name: 'CallStaticVoidMethodV', handler: function(emu, args) {
+                var methodId = args[2];
+                var method = self._methodRegistry.get(methodId);
+                var name = method ? method.name : '?';
+                self._logJNI('CallStaticVoidMethodV', name + ' class=0x' + (args[1]>>>0).toString(16));
+                // Intercept closeApp — game wants to quit but we keep running
+                if (name === 'closeApp') {
+                    Logger.warn('[JNI] closeApp intercepted — game wants to quit, ignoring');
+                }
+                // v32: Intercept showDialog — read va_list args properly
+                if (name === 'showDialog') {
+                    // CallStaticVoidMethodV: args = [env, class, methodID, va_list]
+                    // va_list points to 3 jstring values on the stack
+                    var vaPtr = args[3];
+                    var titleHandle = 0, msgHandle = 0, btnHandle = 0;
+                    try {
+                        titleHandle = self._readU32Emu(emu, vaPtr);
+                        msgHandle = self._readU32Emu(emu, vaPtr + 4);
+                        btnHandle = self._readU32Emu(emu, vaPtr + 8);
+                    } catch(e) {}
+                    var title = self._strings.get(titleHandle) || self._strings.get(args[3]) || '?';
+                    var msg = self._strings.get(msgHandle) || self._strings.get(args[4]) || '?';
+                    Logger.warn('[JNI] showDialog: title="' + title + '" msg="' + msg + '"');
+
+                    // v32: If NO TEXT POOL, dump recent shim calls for diagnosis
+                    if (title.indexOf('TEXT POOL') >= 0 || msg.indexOf('TEXT POOL') >= 0 ||
+                        title === '?' || msg === '?') {
+                        Logger.warn('[JNI] showDialog handles: title=0x' + (titleHandle>>>0).toString(16) +
+                            ' msg=0x' + (msgHandle>>>0).toString(16) + ' btn=0x' + (btnHandle>>>0).toString(16));
+                        Logger.warn('[JNI] showDialog va_list at 0x' + (vaPtr>>>0).toString(16));
+                        // Dump all string handles for debugging
+                        Logger.warn('[JNI] String table (' + self._strings.size + ' entries):');
+                        var strCount = 0;
+                        for (var entry of self._strings) {
+                            if (strCount < 30) {
+                                Logger.warn('  0x' + (entry[0]>>>0).toString(16) + ' → "' + entry[1].substring(0, 50) + '"');
+                            }
+                            strCount++;
+                        }
+                        // v35: Dump FILE struct state for open files
+                        if (window._filePtrToFd && window._filePtrToFd.size > 0) {
+                            Logger.warn('[v35] Open FILE handles (' + window._filePtrToFd.size + '):');
+                            for (var entry of window._filePtrToFd) {
+                                var fp = entry[0], fdx = entry[1];
+                                try {
+                                    var fpBytes = emu.mem_read(fp, 24);
+                                    var curP = (fpBytes[0] | (fpBytes[1]<<8) | (fpBytes[2]<<16) | (fpBytes[3]<<24)) >>> 0;
+                                    var curR = (fpBytes[4] | (fpBytes[5]<<8) | (fpBytes[6]<<16) | (fpBytes[7]<<24)) >>> 0;
+                                    var bfBase = (fpBytes[16] | (fpBytes[17]<<8) | (fpBytes[18]<<16) | (fpBytes[19]<<24)) >>> 0;
+                                    var bfSize = (fpBytes[20] | (fpBytes[21]<<8) | (fpBytes[22]<<16) | (fpBytes[23]<<24)) >>> 0;
+                                    var consumed = (curP - bfBase) >>> 0;
+                                    Logger.warn('  FILE*=0x' + fp.toString(16) + ' fd=' + fdx +
+                                        ' _p=0x' + curP.toString(16) + ' _r=' + curR +
+                                        ' base=0x' + bfBase.toString(16) + ' size=' + bfSize +
+                                        ' consumed=' + consumed);
+                                } catch(e2) {
+                                    Logger.warn('  FILE*=0x' + fp.toString(16) + ' fd=' + fdx + ' ERROR: ' + e2);
+                                }
+                            }
+                        } else {
+                            Logger.warn('[v35] No open FILE handles (all closed or map unavailable)');
+                        }
+                        // Dump recent shim calls from engine
+                        if (self.engine && self.engine._recentShimCalls) {
+                            Logger.warn('[v32] === RECENT SHIM CALLS before *NO TEXT POOL* ===');
+                            for (var i = 0; i < self.engine._recentShimCalls.length; i++) {
+                                var call = self.engine._recentShimCalls[i];
+                                Logger.warn('  [' + i + '] ' + call.name + ' insn=' + call.insn +
+                                    ' LR=0x' + (call.lr>>>0).toString(16) +
+                                    ' R0=0x' + (call.r0>>>0).toString(16) +
+                                    ' R1=0x' + (call.r1>>>0).toString(16) +
+                                    ' R2=0x' + (call.r2>>>0).toString(16) +
+                                    ' R3=0x' + (call.r3>>>0).toString(16));
+                            }
+                        }
+                    }
+                }
+                return 0;
+            } },
             143: { name: 'CallStaticVoidMethodA', handler: function(emu, args) { return 0; } },
 
             // ---- Static Fields ----
@@ -893,6 +964,53 @@ class JNIBridge {
                 Logger.warn('  [' + i + '] Failed to read native method');
             }
         }
+    }
+
+    _handleBooleanMethod(emu, args) {
+        var methodId = args[2];
+        var method = this._methodRegistry.get(methodId);
+        var name = method ? method.name : '?';
+        var nameLower = name.toLowerCase();
+
+        // First run — return false (not first run, game is already "installed")
+        if (nameLower.indexOf('isfirstrun') >= 0 || nameLower === 'firstrun') {
+            this._logJNI('CallBooleanMethod', name + ' → 0 (not first run)');
+            return 0;
+        }
+        // Language changed — return false (no change)
+        if (nameLower.indexOf('haslanguagechanged') >= 0 || nameLower.indexOf('sethaslanguagechanged') >= 0) {
+            this._logJNI('CallBooleanMethod', name + ' → 0 (no language change)');
+            return 0;
+        }
+        // Network connectivity — always return true (connected)
+        if (nameLower.indexOf('isconnected') >= 0 || nameLower.indexOf('isnetwork') >= 0 ||
+            nameLower.indexOf('isonline') >= 0 || nameLower.indexOf('isavailable') >= 0 ||
+            nameLower.indexOf('haswifi') >= 0 || nameLower.indexOf('iswifi') >= 0 ||
+            nameLower.indexOf('hasnetwork') >= 0 || nameLower.indexOf('isreachable') >= 0 ||
+            nameLower.indexOf('networkavailable') >= 0 || nameLower.indexOf('hasconnect') >= 0) {
+            this._logJNI('CallBooleanMethod', name + ' → 1 (network=connected)');
+            return 1;
+        }
+        // Airplane mode — return false (not in airplane mode)
+        if (nameLower.indexOf('airplane') >= 0 || nameLower.indexOf('flightmode') >= 0) {
+            this._logJNI('CallBooleanMethod', name + ' → 0 (not airplane)');
+            return 0;
+        }
+        // Download complete / ready checks — return true
+        if (nameLower.indexOf('iscomplete') >= 0 || nameLower.indexOf('isready') >= 0 ||
+            nameLower.indexOf('isfinished') >= 0 || nameLower.indexOf('isloaded') >= 0 ||
+            nameLower.indexOf('isdone') >= 0) {
+            this._logJNI('CallBooleanMethod', name + ' → 1 (ready)');
+            return 1;
+        }
+        // mkdir — return true (directory created)
+        if (nameLower === 'mkdir' || nameLower === 'mkdirs') {
+            this._logJNI('CallBooleanMethod', name + ' → 1 (mkdir ok)');
+            return 1;
+        }
+        // Default: return 1 (true) — most boolean checks are "is X available/enabled"
+        this._logJNI('CallBooleanMethod', name + ' → 1 (default true)');
+        return 1;
     }
 
     _handleCallMethod(type, emu, args) {

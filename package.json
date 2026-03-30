@@ -12,6 +12,7 @@
     "serve": "npx serve site -l 8080"
   },
   "dependencies": {
+    "pako": "^2.1.0",
     "puppeteer": "^22.0.0"
   }
 }

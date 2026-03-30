@@ -44,6 +44,11 @@ const AndroidShims = {
     _netRequestCount: 0,
     _netResponseCount: 0,
 
+    // v28: Directory enumeration for opendir/readdir/closedir
+    _dirHandles: new Map(),   // handle_id -> { path, entries[], index }
+    _nextDirHandle: 0xA0000000,
+    _direntBuf: 0,  // allocated buffer for dirent struct
+
     init(engine) {
         this.engine = engine;
         this.vfs = engine.vfs || null;
@@ -57,7 +62,32 @@ const AndroidShims = {
         this._threadsDone = new Set();
         this._condSignaled = new Set();
         this._dlsymStubs = new Map();
-        Logger.info('Android shims v26 initialized (+ ctype/libc/C++ stdlib + enhanced STUB diagnostics)');
+        this._dirHandles = new Map();
+        this._nextDirHandle = 0xA0000000;
+        this._direntBuf = 0;
+        this._filePtrToFd = new Map();
+        this._filePtrBufs = new Map();
+        // v35: Expose for cross-module diagnostics
+        window._filePtrToFd = this._filePtrToFd;
+        window._filePtrBufs = this._filePtrBufs;
+        this._freadLogCount = 0;
+        // v29: Register missing VFS files the game expects to find
+        if (this.vfs) {
+            // synergy_uid_override — auth UID for private server (empty = auto-generate)
+            this.vfs.addFile('/synergy_uid_override', '');
+            this.vfs.addFile('synergy_uid_override', '');
+            // Telemetry/log files — game opens these; provide empty stubs
+            this.vfs.addFile('/SendingFunnelLog', '');
+            this.vfs.addFile('/LoadingFunnelLog', '');
+            this.vfs.addFile('/LoadingFunnelLog_timesPurged', '');
+            this.vfs.addFile('/prefbackup', '');
+            this.vfs.addFile('SendingFunnelLog', '');
+            this.vfs.addFile('LoadingFunnelLog', '');
+            this.vfs.addFile('LoadingFunnelLog_timesPurged', '');
+            this.vfs.addFile('prefbackup', '');
+            Logger.info('[VFS] v29: Registered synergy_uid_override + telemetry stubs');
+        }
+        Logger.info('Android shims v29 initialized (+ memory fixes + VFS stubs)');
     },
 
     // ============================================
@@ -175,6 +205,43 @@ const AndroidShims = {
         this._netResponseCount++;
 
         Logger.info('[NET] HTTP Response: ' + status + ' ' + statusText + ' (' + respBody.length + ' bytes body)');
+    },
+
+    // v28b: Sync bionic FILE struct buffer pointers with VFS position
+    // After fread/fseek, update _p and _r so ARM getc() macro works correctly
+    _syncFileStruct(emu, filePtr, fd) {
+        if (!this._filePtrToFd || !this._filePtrToFd.has(filePtr)) return;
+        if (!this._filePtrBufs || !this._filePtrBufs.has(filePtr)) return;
+        if (!this.vfs) return;
+
+        var handle = this.vfs._handles.get(fd);
+        if (!handle) return;
+
+        var bufBase = this._filePtrBufs.get(filePtr);
+        var pos = handle.pos;
+        var remaining = handle.size - pos;
+
+        // _p at offset 0: bufBase + pos
+        var newP = (bufBase + pos) >>> 0;
+        try {
+            emu.mem_write(filePtr, [
+                newP & 0xFF, (newP >> 8) & 0xFF,
+                (newP >> 16) & 0xFF, (newP >> 24) & 0xFF
+            ]);
+            // _r at offset 4: remaining bytes
+            emu.mem_write(filePtr + 4, [
+                remaining & 0xFF, (remaining >> 8) & 0xFF,
+                (remaining >> 16) & 0xFF, (remaining >> 24) & 0xFF
+            ]);
+            // v30: Clear __SEOF (0x0020) and __SERR (0x0040) flags at offset 12
+            // When bionic's internal reads exhaust the buffer and _read returns 0/EOF,
+            // bionic sets __SEOF. If _read returned -1 (our old bug), __SERR is set.
+            // These flags prevent subsequent reads/seeks from working. Clear them on sync.
+            var flagsBytes = emu.mem_read(filePtr + 12, 2);
+            var flags = flagsBytes[0] | (flagsBytes[1] << 8);
+            flags &= ~(0x0020 | 0x0040);  // clear __SEOF and __SERR
+            emu.mem_write(filePtr + 12, [flags & 0xFF, (flags >> 8) & 0xFF]);
+        } catch(e) {}
     },
 
     malloc(size) {
@@ -1051,23 +1118,243 @@ const AndroidShims = {
                 var path = self._readCString(emu, args[0]);
                 var mode = self._readCString(emu, args[1]);
 
-                // Debug: log the address and result for tracing string bridge issues
                 if (!path) {
                     Logger.warn('[fopen] EMPTY path from addr 0x' + (args[0]>>>0).toString(16) + ' mode=' + mode);
+                }
+
+                Logger.info('[fopen] ATTEMPT: "' + path + '" mode=' + mode);
+
+                // v29f: Return NULL for telemetry/log files — the game handles NULL
+                // gracefully by skipping processing. Creating FILE structs for these
+                // causes infinite spin loops in bionic's fwrite/fgetc internal state machine.
+                var telemetryFiles = ['SendingFunnelLog', 'LoadingFunnelLog', 'LoadingFunnelLog_timesPurged',
+                                      'prefbackup', 'synergy_uid_override'];
+                var baseName = path ? path.replace(/.*\//, '') : '';
+                if (telemetryFiles.indexOf(baseName) >= 0) {
+                    Logger.info('[fopen] SKIP telemetry file: ' + baseName + ' → returning NULL');
+                    return 0;
                 }
 
                 // Try VFS first
                 if (self.vfs) {
                     var fd = self.vfs.fopen(path, mode);
-                    if (fd) return fd; // VFS has this file
+                    if (fd) {
+                        // v28b: Return heap-allocated FILE struct with full bionic layout
+                        // ARM code reads directly from FILE struct buffer pointers (getc macro)
+                        // Bionic __sFILE layout:
+                        //   0:  unsigned char *_p     — current position in buffer
+                        //   4:  int _r                — read space left for getc()
+                        //   8:  int _w                — write space left for putc()
+                        //  12:  short _flags           — flags
+                        //  14:  short _file            — file descriptor number
+                        //  16:  struct __sbuf { char *_base; int _size; } _bf
+                        //  24:  int _lbfsize
+                        //  28:  void *_cookie
+                        //  32:  int (*_close)(void *)
+                        //  36:  int (*_read)(void *, char *, int)
+                        //  40:  fpos_t (*_seek)(void *, fpos_t, int)
+                        //  44:  int (*_write)(void *, const char *, int)
+                        //  48+: extension fields
+
+                        var handle = self.vfs._handles.get(fd);
+                        var fileSize = handle ? handle.size : 0;
+
+                        // v29c: Detect write mode — needs a valid write buffer even for empty files
+                        var isWriteMode = mode && (mode.indexOf('w') >= 0 || mode.indexOf('a') >= 0 || mode.indexOf('+') >= 0);
+
+                        // Allocate buffer for file contents in emulator memory
+                        // For write modes, allocate a 4KB write buffer even if file is empty
+                        var bufPtr = 0;
+                        var bufSize = fileSize;
+                        if (isWriteMode && bufSize < 4096) {
+                            bufSize = 4096; // minimum write buffer
+                        }
+                        if (bufSize > 0) {
+                            bufPtr = self.malloc(bufSize);
+                            if (bufPtr) {
+                                try {
+                                    if (handle && handle.data && fileSize > 0) {
+                                        // Copy file data into emulator memory
+                                        var chunk = Array.from(handle.data);
+                                        emu.mem_write(bufPtr, chunk);
+                                        // v28c: Verify buffer was written correctly
+                                        var verifyLen = Math.min(32, fileSize);
+                                        var verify = emu.mem_read(bufPtr, verifyLen);
+                                        var match = true;
+                                        for (var vi = 0; vi < verifyLen; vi++) {
+                                            if (verify[vi] !== handle.data[vi]) { match = false; break; }
+                                        }
+                                        var hexPreview = Array.from(verify).slice(0, 16).map(function(b) { return b.toString(16).padStart(2, '0'); }).join(' ');
+                                        Logger.info('[fopen] Loaded ' + fileSize + ' bytes into buffer at 0x' + bufPtr.toString(16) + ' verify=' + (match ? 'OK' : 'MISMATCH') + ' [' + hexPreview + ']');
+                                    }
+                                } catch(e) {
+                                    Logger.warn('[fopen] Failed to load file buffer: ' + e.message);
+                                    self.free(bufPtr);
+                                    bufPtr = 0;
+                                    bufSize = 0;
+                                }
+                            }
+                        }
+
+                        // Allocate FILE struct (80 bytes)
+                        var filePtr = self.malloc(80);
+                        if (filePtr) {
+                            try {
+                                var fs = new Array(80).fill(0);
+
+                                // _p at offset 0: pointer to current position in buffer
+                                var p = bufPtr || 0;
+                                fs[0] = p & 0xFF; fs[1] = (p >> 8) & 0xFF;
+                                fs[2] = (p >> 16) & 0xFF; fs[3] = (p >> 24) & 0xFF;
+
+                                // _r at offset 4: bytes remaining to read
+                                fs[4] = fileSize & 0xFF; fs[5] = (fileSize >> 8) & 0xFF;
+                                fs[6] = (fileSize >> 16) & 0xFF; fs[7] = (fileSize >> 24) & 0xFF;
+
+                                // _w at offset 8: write space left
+                                // v29c: For write modes, set write space = buffer capacity - current data
+                                var writeSpace = isWriteMode ? (bufSize - fileSize) : 0;
+                                fs[8] = writeSpace & 0xFF; fs[9] = (writeSpace >> 8) & 0xFF;
+                                fs[10] = (writeSpace >> 16) & 0xFF; fs[11] = (writeSpace >> 24) & 0xFF;
+
+                                // _flags at offset 12: __SRD=0x0004 (read), __SWR=0x0008 (write), __SRW=0x0010 (r+w)
+                                var flags = isWriteMode ? 0x0008 : 0x0004;
+                                if (mode && mode.indexOf('+') >= 0) flags = 0x0010;
+                                fs[12] = flags & 0xFF; fs[13] = (flags >> 8) & 0xFF;
+
+                                // _file at offset 14: file descriptor
+                                fs[14] = fd & 0xFF; fs[15] = (fd >> 8) & 0xFF;
+
+                                // _bf._base at offset 16: base of buffer
+                                fs[16] = p & 0xFF; fs[17] = (p >> 8) & 0xFF;
+                                fs[18] = (p >> 16) & 0xFF; fs[19] = (p >> 24) & 0xFF;
+
+                                // _bf._size at offset 20: total buffer capacity
+                                fs[20] = bufSize & 0xFF; fs[21] = (bufSize >> 8) & 0xFF;
+                                fs[22] = (bufSize >> 16) & 0xFF; fs[23] = (bufSize >> 24) & 0xFF;
+
+                                // v29e: Set FILE function pointers (offsets 28-44)
+                                // Without these, bionic's fwrite/fflush/fgetc call NULL → infinite retry
+                                // _lbfsize at offset 24: 0 (no line buffering)
+                                // _cookie at offset 28: fd (used by _read/_write/_close/_seek)
+                                var cookieVal = fd;
+                                fs[28] = cookieVal & 0xFF; fs[29] = (cookieVal >> 8) & 0xFF;
+                                fs[30] = (cookieVal >> 16) & 0xFF; fs[31] = (cookieVal >> 24) & 0xFF;
+
+                                if (self.engine) {
+                                    // _close at offset 32
+                                    var closeStub = self.engine.FILE_CLOSE_STUB || 0;
+                                    fs[32] = closeStub & 0xFF; fs[33] = (closeStub >> 8) & 0xFF;
+                                    fs[34] = (closeStub >> 16) & 0xFF; fs[35] = (closeStub >> 24) & 0xFF;
+
+                                    // _read at offset 36
+                                    var readStub = self.engine.FILE_READ_STUB || 0;
+                                    fs[36] = readStub & 0xFF; fs[37] = (readStub >> 8) & 0xFF;
+                                    fs[38] = (readStub >> 16) & 0xFF; fs[39] = (readStub >> 24) & 0xFF;
+
+                                    // _seek at offset 40
+                                    var seekStub = self.engine.FILE_SEEK_STUB || 0;
+                                    fs[40] = seekStub & 0xFF; fs[41] = (seekStub >> 8) & 0xFF;
+                                    fs[42] = (seekStub >> 16) & 0xFF; fs[43] = (seekStub >> 24) & 0xFF;
+
+                                    // _write at offset 44
+                                    var writeStub = self.engine.FILE_WRITE_STUB || 0;
+                                    fs[44] = writeStub & 0xFF; fs[45] = (writeStub >> 8) & 0xFF;
+                                    fs[46] = (writeStub >> 16) & 0xFF; fs[47] = (writeStub >> 24) & 0xFF;
+                                }
+
+                                emu.mem_write(filePtr, fs);
+                                // v29f: Verify FILE struct including function pointers
+                                var fsVerify = emu.mem_read(filePtr, 48);
+                                var vp = (fsVerify[0] | (fsVerify[1] << 8) | (fsVerify[2] << 16) | (fsVerify[3] << 24)) >>> 0;
+                                var vr = (fsVerify[4] | (fsVerify[5] << 8) | (fsVerify[6] << 16) | (fsVerify[7] << 24)) >>> 0;
+                                var vbase = (fsVerify[16] | (fsVerify[17] << 8) | (fsVerify[18] << 16) | (fsVerify[19] << 24)) >>> 0;
+                                var vsize = (fsVerify[20] | (fsVerify[21] << 8) | (fsVerify[22] << 16) | (fsVerify[23] << 24)) >>> 0;
+                                var vclose = (fsVerify[32] | (fsVerify[33] << 8) | (fsVerify[34] << 16) | (fsVerify[35] << 24)) >>> 0;
+                                var vread = (fsVerify[36] | (fsVerify[37] << 8) | (fsVerify[38] << 16) | (fsVerify[39] << 24)) >>> 0;
+                                var vwrite = (fsVerify[44] | (fsVerify[45] << 8) | (fsVerify[46] << 16) | (fsVerify[47] << 24)) >>> 0;
+                                Logger.info('[fopen] FILE struct verify: _p=0x' + vp.toString(16) + ' _r=' + vr + ' _bf.base=0x' + vbase.toString(16) + ' _bf.size=' + vsize +
+                                    ' _close=0x' + vclose.toString(16) + ' _read=0x' + vread.toString(16) + ' _write=0x' + vwrite.toString(16));
+                            } catch(e) {
+                                Logger.warn('[fopen] Failed to write FILE struct: ' + e.message);
+                            }
+
+                            // Map FILE* back to fd and track buffer for cleanup
+                            self._filePtrToFd.set(filePtr, fd);
+                            if (!self._filePtrBufs) self._filePtrBufs = new Map();
+                            if (bufPtr) self._filePtrBufs.set(filePtr, bufPtr);
+
+                            Logger.info('[fopen] HIT: ' + path + ' -> fd=' + fd + ' FILE*=0x' + filePtr.toString(16) + ' buf=0x' + (bufPtr||0).toString(16) + ' size=' + fileSize);
+                            return filePtr;
+                        }
+                        // Fallback: return fd directly
+                        Logger.info('[fopen] HIT (raw fd): ' + path + ' -> fd=' + fd);
+                        return fd;
+                    }
                 }
 
                 // Not in VFS — log and return NULL
-                Logger.info('[fopen] MISS: ' + path + ' mode=' + mode);
+                Logger.warn('[fopen] MISS: ' + path + ' mode=' + mode);
                 return 0;
             },
             'fclose':  function(emu, args) {
-                var fd = args[0];
+                var filePtr = args[0];
+                // v28: Resolve FILE* to fd and free resources
+                var fd = filePtr;
+                if (self._filePtrToFd && self._filePtrToFd.has(filePtr)) {
+                    fd = self._filePtrToFd.get(filePtr);
+
+                    // v33: Diagnostic - read FILE struct state before freeing
+                    if (self._filePtrBufs && self._filePtrBufs.has(filePtr)) {
+                        var bufBase = self._filePtrBufs.get(filePtr);
+                        try {
+                            var pBytes = emu.mem_read(filePtr, 4);
+                            var currentP = (pBytes[0] | (pBytes[1]<<8) | (pBytes[2]<<16) | (pBytes[3]<<24)) >>> 0;
+                            var rBytes = emu.mem_read(filePtr + 4, 4);
+                            var currentR = (rBytes[0] | (rBytes[1]<<8) | (rBytes[2]<<16) | (rBytes[3]<<24)) >>> 0;
+                            var bytesConsumed = (currentP - bufBase) >>> 0;
+                            var handle = self.vfs ? self.vfs._handles.get(fd) : null;
+                            var vfsPos = handle ? handle.pos : -1;
+                            var vfsSize = handle ? handle.size : -1;
+                            var path = handle ? handle.path : '?';
+                            Logger.warn('[v33-fclose] FILE*=0x' + filePtr.toString(16) +
+                                ' fd=' + fd + ' path=' + path +
+                                ' bufBase=0x' + bufBase.toString(16) +
+                                ' _p=0x' + currentP.toString(16) +
+                                ' _r=' + currentR +
+                                ' bytesConsumed=' + bytesConsumed +
+                                ' vfsPos=' + vfsPos + '/' + vfsSize);
+                            // Dump the first 64 bytes of the buffer to see what the game read
+                            if (bytesConsumed > 0 && bytesConsumed <= 256) {
+                                var dumpLen = Math.min(bytesConsumed + 16, 64);
+                                var preview = emu.mem_read(bufBase, dumpLen);
+                                Logger.warn('[v33-fclose] Buffer[0..' + dumpLen + ']: ' +
+                                    Array.from(preview).map(function(b) { return b.toString(16).padStart(2,'0'); }).join(' '));
+                                // Show ASCII
+                                var ascii = '';
+                                for (var ai = 0; ai < preview.length; ai++) {
+                                    ascii += (preview[ai] >= 32 && preview[ai] < 127) ? String.fromCharCode(preview[ai]) : '.';
+                                }
+                                Logger.warn('[v33-fclose] ASCII: ' + ascii);
+                            }
+                            // If bytesConsumed is exactly 4, game only read magic bytes
+                            if (bytesConsumed === 4) {
+                                Logger.warn('[v33-fclose] ONLY 4 bytes consumed (magic "BGrm") - game rejected file immediately after magic check!');
+                                // Dump bytes 4-16 to see what the game WOULD have read next
+                                var nextBytes = emu.mem_read(bufBase + 4, 16);
+                                Logger.warn('[v33-fclose] Bytes[4..20] (unread): ' +
+                                    Array.from(nextBytes).map(function(b) { return b.toString(16).padStart(2,'0'); }).join(' '));
+                            }
+                        } catch(e) {
+                            Logger.warn('[v33-fclose] Error reading FILE struct: ' + e);
+                        }
+
+                        self.free(self._filePtrBufs.get(filePtr));
+                        self._filePtrBufs.delete(filePtr);
+                    }
+                    self._filePtrToFd.delete(filePtr);
+                    self.free(filePtr); // free the FILE struct
+                }
                 if (self.vfs && fd >= 100) {
                     return self.vfs.fclose(fd);
                 }
@@ -1077,43 +1364,181 @@ const AndroidShims = {
                 var destPtr = args[0];
                 var itemSize = args[1];
                 var itemCount = args[2];
-                var fd = args[3];
-                
+                var filePtr = args[3];
+                // v28: Resolve FILE* pointer to VFS fd
+                var fd = (self._filePtrToFd && self._filePtrToFd.has(filePtr)) ? self._filePtrToFd.get(filePtr) : filePtr;
+
                 if (self.vfs && fd >= 100) {
-                    return self.vfs.fread(fd, destPtr, itemSize, itemCount, emu);
+                    var posBefore = self.vfs.ftell(fd);
+                    var result = self.vfs.fread(fd, destPtr, itemSize, itemCount, emu);
+
+                    // v28b: Sync FILE struct buffer pointers after read
+                    self._syncFileStruct(emu, filePtr, fd);
+
+                    // Log fread calls with data preview
+                    if (self._freadLogCount < 200) {
+                        self._freadLogCount++;
+                        var totalBytes = itemSize * result;
+                        var preview = '';
+                        if (totalBytes > 0 && totalBytes <= 32 && destPtr) {
+                            try {
+                                var readBytes = emu.mem_read(destPtr, Math.min(totalBytes, 16));
+                                preview = ' data=[' + Array.from(readBytes).map(function(b) { return '0x' + b.toString(16).padStart(2, '0'); }).join(',') + ']';
+                                var ascii = '';
+                                for (var bi = 0; bi < readBytes.length; bi++) {
+                                    ascii += (readBytes[bi] >= 32 && readBytes[bi] < 127) ? String.fromCharCode(readBytes[bi]) : '.';
+                                }
+                                preview += ' "' + ascii + '"';
+                            } catch(e) {}
+                        }
+                        Logger.info('[fread] fd=' + fd + ' pos=' + posBefore + ' size=' + itemSize + ' count=' + itemCount + ' -> ' + result + ' items (' + totalBytes + ' bytes)' + preview);
+                    }
+                    return result;
                 }
                 return 0;
             },
             'fwrite':  function(emu, args) { return args[2]; }, // pretend success
+            // v28d: fgetc — critical for BGrm parsing! Game reads byte-by-byte after magic
+            'fgetc':   function(emu, args) {
+                var filePtr = args[0];
+                var fd = (self._filePtrToFd && self._filePtrToFd.has(filePtr)) ? self._filePtrToFd.get(filePtr) : filePtr;
+                if (self.vfs && fd >= 100) {
+                    var handle = self.vfs._handles.get(fd);
+                    if (handle && handle.pos < handle.size) {
+                        var byte = handle.data[handle.pos];
+                        handle.pos++;
+                        // Sync FILE struct
+                        self._syncFileStruct(emu, filePtr, fd);
+                        return byte;
+                    }
+                    return -1; // EOF
+                }
+                return -1; // EOF
+            },
+            'getc':    function(emu, args) {
+                return self.engine.shims['fgetc'](emu, args);
+            },
+            'getc_unlocked': function(emu, args) {
+                return self.engine.shims['fgetc'](emu, args);
+            },
+            'ungetc':  function(emu, args) {
+                // ungetc(c, stream) — push byte back
+                var c = args[0];
+                var filePtr = args[1];
+                var fd = (self._filePtrToFd && self._filePtrToFd.has(filePtr)) ? self._filePtrToFd.get(filePtr) : filePtr;
+                if (self.vfs && fd >= 100) {
+                    var handle = self.vfs._handles.get(fd);
+                    if (handle && handle.pos > 0) {
+                        handle.pos--;
+                        self._syncFileStruct(emu, filePtr, fd);
+                    }
+                }
+                return c;
+            },
+            'fputc':   function(emu, args) { return args[0] & 0xFF; },
+            'fputs':   function(emu, args) { return 0; },
+            'fprintf': function(emu, args) { return 0; },
+            'vfprintf': function(emu, args) { return 0; },
+            'fdopen':  function(emu, args) {
+                // fdopen(fd, mode) — convert POSIX fd to FILE*
+                var fd = args[0];
+                var mode = self._readCString(emu, args[1]);
+                Logger.info('[fdopen] fd=' + fd + ' mode=' + mode);
+                if (self.vfs && fd >= 100) {
+                    var handle = self.vfs._handles.get(fd);
+                    if (handle) {
+                        var fileSize = handle.size;
+                        var bufPtr = self.malloc(fileSize);
+                        if (bufPtr && fileSize > 0) {
+                            try {
+                                emu.mem_write(bufPtr, Array.from(handle.data));
+                            } catch(e) { self.free(bufPtr); bufPtr = 0; }
+                        }
+                        var filePtr = self.malloc(80);
+                        if (filePtr) {
+                            var fs = new Array(80).fill(0);
+                            var p = bufPtr || 0;
+                            fs[0] = p & 0xFF; fs[1] = (p >> 8) & 0xFF;
+                            fs[2] = (p >> 16) & 0xFF; fs[3] = (p >> 24) & 0xFF;
+                            fs[4] = fileSize & 0xFF; fs[5] = (fileSize >> 8) & 0xFF;
+                            fs[6] = (fileSize >> 16) & 0xFF; fs[7] = (fileSize >> 24) & 0xFF;
+                            fs[12] = 0x04; fs[13] = 0x00;
+                            fs[14] = fd & 0xFF; fs[15] = (fd >> 8) & 0xFF;
+                            fs[16] = p & 0xFF; fs[17] = (p >> 8) & 0xFF;
+                            fs[18] = (p >> 16) & 0xFF; fs[19] = (p >> 24) & 0xFF;
+                            fs[20] = fileSize & 0xFF; fs[21] = (fileSize >> 8) & 0xFF;
+                            fs[22] = (fileSize >> 16) & 0xFF; fs[23] = (fileSize >> 24) & 0xFF;
+                            try { emu.mem_write(filePtr, fs); } catch(e) {}
+                            self._filePtrToFd.set(filePtr, fd);
+                            if (!self._filePtrBufs) self._filePtrBufs = new Map();
+                            if (bufPtr) self._filePtrBufs.set(filePtr, bufPtr);
+                            return filePtr;
+                        }
+                    }
+                }
+                return 0;
+            },
+            'fseeko':  function(emu, args) {
+                return self.engine.shims['fseek'](emu, args);
+            },
+            'ftello':  function(emu, args) {
+                return self.engine.shims['ftell'](emu, args);
+            },
+            'lseek64': function(emu, args) {
+                // lseek64(fd, offset_lo, offset_hi, result_ptr, whence)
+                // For simplicity treat as lseek with 32-bit offset
+                var fd = args[0];
+                var offset = args[1] | 0;
+                var whence = args[3]; // arg[2]=offset_hi, arg[3]=whence
+                if (self.vfs && fd >= 100) {
+                    self.vfs.fseek(fd, offset, whence);
+                    return self.vfs.ftell(fd);
+                }
+                return -1;
+            },
+            '__open_2': function(emu, args) {
+                return self.engine.shims['open'](emu, args);
+            },
             'fgets':   function(emu, args) {
                 var destPtr = args[0];
                 var maxLen = args[1];
-                var fd = args[2];
-                
+                var filePtr = args[2];
+                var fd = (self._filePtrToFd && self._filePtrToFd.has(filePtr)) ? self._filePtrToFd.get(filePtr) : filePtr;
+
                 if (self.vfs && fd >= 100) {
                     return self.vfs.fgets(fd, destPtr, maxLen, emu);
                 }
                 return 0;
             },
             'fseek':   function(emu, args) {
-                var fd = args[0];
+                var filePtr = args[0];
+                var fd = (self._filePtrToFd && self._filePtrToFd.has(filePtr)) ? self._filePtrToFd.get(filePtr) : filePtr;
                 var offset = args[1] | 0; // signed
                 var whence = args[2];
-                
+
                 if (self.vfs && fd >= 100) {
-                    return self.vfs.fseek(fd, offset, whence);
+                    var result = self.vfs.fseek(fd, offset, whence);
+                    // v28b: Sync FILE struct buffer pointers after seek
+                    self._syncFileStruct(emu, filePtr, fd);
+                    var whenceStr = whence === 0 ? 'SET' : whence === 1 ? 'CUR' : 'END';
+                    Logger.info('[fseek] fd=' + fd + ' offset=' + offset + ' whence=' + whenceStr + ' -> pos=' + self.vfs.ftell(fd));
+                    return result;
                 }
                 return -1;
             },
             'ftell':   function(emu, args) {
-                var fd = args[0];
+                var filePtr = args[0];
+                var fd = (self._filePtrToFd && self._filePtrToFd.has(filePtr)) ? self._filePtrToFd.get(filePtr) : filePtr;
                 if (self.vfs && fd >= 100) {
-                    return self.vfs.ftell(fd);
+                    var pos = self.vfs.ftell(fd);
+                    Logger.info('[ftell] fd=' + fd + ' -> ' + pos);
+                    return pos;
                 }
                 return -1;
             },
             'feof':    function(emu, args) {
-                var fd = args[0];
+                var filePtr = args[0];
+                var fd = (self._filePtrToFd && self._filePtrToFd.has(filePtr)) ? self._filePtrToFd.get(filePtr) : filePtr;
                 if (self.vfs && fd >= 100) {
                     return self.vfs.feof(fd);
                 }
@@ -1123,11 +1548,13 @@ const AndroidShims = {
             'fflush':  function(emu, args) { return 0; },
             'open':    function(emu, args) {
                 var path = self._readCString(emu, args[0]);
+                var flags = args[1];
+                Logger.info('[open] ATTEMPT: "' + path + '" flags=0x' + (flags>>>0).toString(16));
                 // For POSIX open(), try VFS too
                 if (self.vfs && self.vfs.exists(path)) {
                     var fd = self.vfs.fopen(path, 'r');
                     if (fd) {
-                        Logger.info('[open] VFS HIT: ' + path + ' → fd=' + fd);
+                        Logger.info('[open] VFS HIT: ' + path + ' -> fd=' + fd);
                         return fd;
                     }
                 }
@@ -1169,7 +1596,38 @@ const AndroidShims = {
                     Logger.info('[stat] VFS HIT: ' + path + ' size=' + size);
                     return 0;
                 }
+                // v28: Check if path is a directory in VFS
+                if (self.vfs && path) {
+                    var dirPath = path.replace(/\/+$/, '') + '/';
+                    var normalized = self.vfs._normalizePath(dirPath);
+                    for (var entry of self.vfs._files) {
+                        if (entry[0].indexOf(normalized) === 0) {
+                            // It's a directory — write stat with S_IFDIR
+                            if (args[1]) {
+                                try {
+                                    var zeros = new Array(128).fill(0);
+                                    emu.mem_write(args[1], zeros);
+                                    var dirMode = 0x4000 | 0x1ED; // S_IFDIR | 0755
+                                    emu.mem_write(args[1] + 8, [dirMode & 0xFF, (dirMode >> 8) & 0xFF, 0, 0]);
+                                } catch(e) {}
+                            }
+                            Logger.info('[stat] VFS DIR HIT: ' + path);
+                            return 0;
+                        }
+                    }
+                }
+                Logger.info('[stat] MISS: ' + path);
                 return -1;
+            },
+            // v28: stat64 alias — ARM Android often uses this
+            'stat64':  function(emu, args) {
+                return self.engine.shims['stat'](emu, args);
+            },
+            'lstat':   function(emu, args) {
+                return self.engine.shims['stat'](emu, args);
+            },
+            'lstat64': function(emu, args) {
+                return self.engine.shims['stat'](emu, args);
             },
             'fstat':   function(emu, args) {
                 // fstat on a VFS fd
@@ -1192,12 +1650,27 @@ const AndroidShims = {
                 }
                 return -1;
             },
+            'fstat64': function(emu, args) {
+                return self.engine.shims['fstat'](emu, args);
+            },
             'access':  function(emu, args) {
                 var path = self._readCString(emu, args[0]);
                 if (self.vfs && self.vfs.exists(path)) {
                     Logger.info('[access] VFS HIT: ' + path);
                     return 0;
                 }
+                // v28: Also check if it's a directory (has children in VFS)
+                if (self.vfs && path) {
+                    var dirPath = path.replace(/\/+$/, '') + '/';
+                    var normalized = self.vfs._normalizePath(dirPath);
+                    for (var entry of self.vfs._files) {
+                        if (entry[0].indexOf(normalized) === 0) {
+                            Logger.info('[access] VFS DIR HIT: ' + path);
+                            return 0;
+                        }
+                    }
+                }
+                Logger.info('[access] MISS: ' + path);
                 return -1;
             },
             'mkdir':   function(emu, args) { return 0; },
@@ -1474,9 +1947,62 @@ const AndroidShims = {
             '__cxa_guard_acquire': function(emu, args) { return 1; },
             '__cxa_guard_release': function(emu, args) { return 0; },
             '__cxa_guard_abort':   function(emu, args) { return 0; },
-            'mmap':      function(emu, args) { return self.malloc(args[1] || 4096); },
+            'mmap':      function(emu, args) {
+                // args: [addr, length, prot, flags, fd, offset]
+                var addr = args[0], length = args[1] || 4096, prot = args[2];
+                var flags = args[3];
+                // fd and offset are on stack for mmap (6 args)
+                var stackArgs = self._readStackArgs(emu, 2);
+                var fd = stackArgs[0], offset = stackArgs[1] || 0;
+
+                var ptr = self.malloc(length);
+                Logger.info('[mmap] addr=0x' + (addr>>>0).toString(16) + ' len=' + length +
+                    ' fd=' + fd + ' offset=' + offset + ' → 0x' + (ptr>>>0).toString(16));
+
+                // v27f: If fd is a VFS file, copy its data into the mmap'd region
+                if (self.vfs && fd >= 100) {
+                    var handle = self.vfs._handles.get(fd);
+                    if (handle && handle.data) {
+                        var start = offset;
+                        var end = Math.min(start + length, handle.data.length);
+                        var toWrite = end - start;
+                        if (toWrite > 0) {
+                            try {
+                                var chunk = Array.from(handle.data.slice(start, end));
+                                emu.mem_write(ptr, chunk);
+                                Logger.info('[mmap] Wrote ' + toWrite + ' bytes from VFS fd=' + fd +
+                                    ' (file: ' + handle.path + ')');
+                            } catch(e) {
+                                Logger.warn('[mmap] Failed to write VFS data: ' + e.message);
+                            }
+                        }
+                    }
+                }
+                return ptr;
+            },
             'munmap':    function(emu, args) { return 0; },
             'mprotect':  function(emu, args) { return 0; },
+            // v28d: fts (file tree walk) — used by game for directory scanning
+            'fts_open':  function(emu, args) { return 0; }, // NULL = error (no dirs to walk)
+            'fts_read':  function(emu, args) { return 0; }, // NULL = end of tree
+            'fts_close': function(emu, args) { return 0; },
+            // v28d: asprintf — allocate and format string
+            'asprintf':  function(emu, args) {
+                var destPtrPtr = args[0];
+                var fmt = self._readCString(emu, args[1]);
+                if (!fmt) return -1;
+                var result = self._formatString(emu, fmt, function(idx) {
+                    return self._readU32(emu, args[2 + idx]);
+                });
+                var ptr = self.malloc(result.length + 1);
+                if (ptr) {
+                    self._writeStringToMem(emu, ptr, result, result.length + 1);
+                    if (destPtrPtr) {
+                        emu.mem_write(destPtrPtr, [ptr & 0xFF, (ptr >> 8) & 0xFF, (ptr >> 16) & 0xFF, (ptr >> 24) & 0xFF]);
+                    }
+                }
+                return result.length;
+            },
 
             // ============================================
             // Android logging (read actual tag + message)
@@ -1570,7 +2096,26 @@ const AndroidShims = {
             // ============================================
             // C++ new/delete
             // ============================================
-            '_Znwj':   function(emu, args) { return self.malloc(args[0] || 16); },
+            '_Znwj':   function(emu, args) {
+                var size = args[0] || 16;
+                var ptr = self.malloc(size);
+                // v33g: Fix BGrm reader endianness detection.
+                // The BGrm reader (64 bytes, allocated from LR=0x112d4eb0) has endianness
+                // fields at +0x10 (platform) and +0x14 (file). Both stay 0 because
+                // the platform endianness detection fails. Set +0x10 to 1 (LE) so it
+                // differs from +0x14 (0 = BE), enabling all conditional byte-swaps.
+                if (size === 0x40 && ptr) {
+                    var lr = self.engine._readReg(uc.ARM_REG_LR);
+                    if ((lr >>> 0) === 0x112d4eb0) {
+                        try {
+                            emu.mem_write(ptr + 0x10, [0x01, 0x00, 0x00, 0x00]);
+                            Logger.info('[v33g] Set BGrm reader endianness field at 0x' +
+                                (ptr + 0x10).toString(16) + ' = 1 (LE != BE)');
+                        } catch(e) {}
+                    }
+                }
+                return ptr;
+            },
             '_Znaj':   function(emu, args) { return self.malloc(args[0] || 16); },
             '_ZdlPv':  function(emu, args) { self.free(args[0]); return 0; },
             '_ZdaPv':  function(emu, args) { self.free(args[0]); return 0; },
@@ -1608,13 +2153,171 @@ const AndroidShims = {
             '__cxa_guard_abort':   function(emu, args) { return 0; },
 
             // ============================================
-            // Compression (zlib stubs)
+            // Compression (zlib — real implementations via pako)
             // ============================================
-            'inflate':       function(emu, args) { return 0; },
-            'inflateInit2_': function(emu, args) { return 0; },
-            'inflateEnd':    function(emu, args) { return 0; },
-            'inflateReset':  function(emu, args) { return 0; },
-            'inflateInit_':  function(emu, args) { return 0; },
+
+            // uncompress(dest, destLenPtr, source, sourceLen) → Z_OK(0) or error
+            'uncompress': function(emu, args) {
+                var dest = args[0], destLenPtr = args[1], source = args[2], sourceLen = args[3];
+                try {
+                    if (!source || !sourceLen || !dest || !destLenPtr) return -2; // Z_STREAM_ERROR
+                    var compressed = emu.mem_read(source, sourceLen);
+                    var destLenBytes = emu.mem_read(destLenPtr, 4);
+                    var destLen = (destLenBytes[0] | (destLenBytes[1] << 8) | (destLenBytes[2] << 16) | (destLenBytes[3] << 24)) >>> 0;
+                    // Use pako.inflate with raw mode (no zlib/gzip header — just raw deflate)
+                    // Try raw first, fall back to zlib-wrapped
+                    var decompressed;
+                    try {
+                        decompressed = pako.inflate(new Uint8Array(compressed));
+                    } catch(e1) {
+                        try {
+                            decompressed = pako.inflateRaw(new Uint8Array(compressed));
+                        } catch(e2) {
+                            Logger.warn('[ZLIB] uncompress failed: ' + e1.message);
+                            return -3; // Z_DATA_ERROR
+                        }
+                    }
+                    if (decompressed.length > destLen) {
+                        Logger.warn('[ZLIB] uncompress: output ' + decompressed.length + ' > destLen ' + destLen);
+                        return -5; // Z_BUF_ERROR
+                    }
+                    emu.mem_write(dest, Array.from(decompressed));
+                    // Write actual output length back to destLenPtr (LE)
+                    var outLen = decompressed.length;
+                    emu.mem_write(destLenPtr, [outLen & 0xFF, (outLen >> 8) & 0xFF, (outLen >> 16) & 0xFF, (outLen >> 24) & 0xFF]);
+                    Logger.info('[ZLIB] uncompress: ' + sourceLen + ' → ' + outLen + ' bytes');
+                    return 0; // Z_OK
+                } catch(e) {
+                    Logger.error('[ZLIB] uncompress exception: ' + e.message);
+                    return -3; // Z_DATA_ERROR
+                }
+            },
+
+            // inflate(strm, flush) → Z_OK(0), Z_STREAM_END(1), or error
+            // z_stream ARM layout (all 4 bytes, little-endian):
+            //   +0x00 next_in, +0x04 avail_in, +0x08 total_in
+            //   +0x0C next_out, +0x10 avail_out, +0x14 total_out
+            //   +0x18 msg, +0x1C state
+            'inflate': function(emu, args) {
+                var strmPtr = args[0], flush = args[1];
+                try {
+                    if (!strmPtr) return -2; // Z_STREAM_ERROR
+                    var self = AndroidShims;
+                    if (!self._zlibStreams) self._zlibStreams = new Map();
+                    var streamInfo = self._zlibStreams.get(strmPtr);
+
+                    // Read z_stream fields
+                    var next_in  = self._readU32(emu, strmPtr + 0x00);
+                    var avail_in = self._readU32(emu, strmPtr + 0x04);
+                    var next_out = self._readU32(emu, strmPtr + 0x0C);
+                    var avail_out= self._readU32(emu, strmPtr + 0x10);
+
+                    var writeU32 = function(addr, val) {
+                        emu.mem_write(addr, [val & 0xFF, (val >> 8) & 0xFF, (val >> 16) & 0xFF, (val >> 24) & 0xFF]);
+                    };
+
+                    // If we have buffered output from a previous decompression, deliver it
+                    if (streamInfo && streamInfo.buffer && streamInfo.bufferPos < streamInfo.buffer.length) {
+                        var remaining = streamInfo.buffer.length - streamInfo.bufferPos;
+                        var outLen = Math.min(remaining, avail_out);
+                        emu.mem_write(next_out, Array.from(streamInfo.buffer.subarray(streamInfo.bufferPos, streamInfo.bufferPos + outLen)));
+                        streamInfo.bufferPos += outLen;
+
+                        writeU32(strmPtr + 0x0C, next_out + outLen);
+                        writeU32(strmPtr + 0x10, avail_out - outLen);
+                        writeU32(strmPtr + 0x14, self._readU32(emu, strmPtr + 0x14) + outLen);
+
+                        var done = (streamInfo.bufferPos >= streamInfo.buffer.length);
+                        Logger.info('[ZLIB] inflate(buffered): out=' + outLen + ' remaining=' + (streamInfo.buffer.length - streamInfo.bufferPos) + (done ? ' DONE' : ''));
+                        return done ? 1 : 0; // Z_STREAM_END or Z_OK
+                    }
+
+                    if (!next_out || !avail_out) return -5; // Z_BUF_ERROR
+                    if (!next_in || !avail_in) return -5; // Z_BUF_ERROR
+
+                    // Read all available input
+                    var input = emu.mem_read(next_in, avail_in);
+
+                    // Determine decompression mode from windowBits
+                    var windowBits = (streamInfo && streamInfo.windowBits !== undefined) ? streamInfo.windowBits : 15;
+                    var decompressed;
+                    try {
+                        if (windowBits < 0) {
+                            decompressed = pako.inflateRaw(new Uint8Array(input));
+                        } else {
+                            decompressed = pako.inflate(new Uint8Array(input));
+                        }
+                    } catch(e1) {
+                        try {
+                            decompressed = (windowBits < 0) ? pako.inflate(new Uint8Array(input)) : pako.inflateRaw(new Uint8Array(input));
+                        } catch(e2) {
+                            Logger.warn('[ZLIB] inflate failed: ' + e1.message);
+                            return -3; // Z_DATA_ERROR
+                        }
+                    }
+
+                    // Write as much output as fits in the output buffer
+                    var outLen = Math.min(decompressed.length, avail_out);
+                    emu.mem_write(next_out, Array.from(decompressed.subarray(0, outLen)));
+
+                    // Consume all input
+                    var consumed = avail_in;
+                    writeU32(strmPtr + 0x00, next_in + consumed);
+                    writeU32(strmPtr + 0x04, 0);
+                    writeU32(strmPtr + 0x08, self._readU32(emu, strmPtr + 0x08) + consumed);
+                    writeU32(strmPtr + 0x0C, next_out + outLen);
+                    writeU32(strmPtr + 0x10, avail_out - outLen);
+                    writeU32(strmPtr + 0x14, self._readU32(emu, strmPtr + 0x14) + outLen);
+
+                    // Buffer remaining output for subsequent calls
+                    var done = (outLen >= decompressed.length);
+                    if (!done && streamInfo) {
+                        streamInfo.buffer = decompressed;
+                        streamInfo.bufferPos = outLen;
+                    }
+
+                    Logger.info('[ZLIB] inflate: in=' + consumed + ' out=' + outLen + '/' + decompressed.length + (done ? ' DONE' : ' (buffered ' + (decompressed.length - outLen) + ' remaining)'));
+                    return done ? 1 : 0; // Z_STREAM_END or Z_OK
+                } catch(e) {
+                    Logger.error('[ZLIB] inflate exception: ' + e.message);
+                    return -3;
+                }
+            },
+
+            // inflateInit2_(strm, windowBits, version, stream_size) → Z_OK(0)
+            'inflateInit2_': function(emu, args) {
+                var strmPtr = args[0], windowBits = args[1];
+                Logger.info('[ZLIB] inflateInit2_: strm=0x' + (strmPtr>>>0).toString(16) + ' windowBits=' + ((windowBits << 0) >> 0));
+                if (!AndroidShims._zlibStreams) AndroidShims._zlibStreams = new Map();
+                AndroidShims._zlibStreams.set(strmPtr, { windowBits: (windowBits << 0) >> 0, initialized: true });
+                return 0; // Z_OK
+            },
+
+            // inflateInit_(strm, version, stream_size) → Z_OK(0)
+            'inflateInit_': function(emu, args) {
+                var strmPtr = args[0];
+                Logger.info('[ZLIB] inflateInit_: strm=0x' + (strmPtr>>>0).toString(16));
+                if (!AndroidShims._zlibStreams) AndroidShims._zlibStreams = new Map();
+                AndroidShims._zlibStreams.set(strmPtr, { windowBits: 15, initialized: true });
+                return 0; // Z_OK
+            },
+
+            'inflateEnd': function(emu, args) {
+                var strmPtr = args[0];
+                if (AndroidShims._zlibStreams) AndroidShims._zlibStreams.delete(strmPtr);
+                return 0; // Z_OK
+            },
+
+            'inflateReset': function(emu, args) {
+                var strmPtr = args[0];
+                if (AndroidShims._zlibStreams) {
+                    var info = AndroidShims._zlibStreams.get(strmPtr);
+                    if (info) { info.buffer = null; info.bufferPos = 0; }
+                }
+                return 0; // Z_OK
+            },
+
+            // Deflate stubs (not needed for loading, keep as no-ops)
             'deflate':       function(emu, args) { return 0; },
             'deflateInit_':  function(emu, args) { return 0; },
             'deflateInit2_': function(emu, args) { return 0; },
@@ -1623,8 +2326,31 @@ const AndroidShims = {
             'compressBound': function(emu, args) { return (args[0] || 0) + 128; },
             'compress':      function(emu, args) { return 0; },
             'compress2':     function(emu, args) { return 0; },
-            'uncompress':    function(emu, args) { return 0; },
-            'crc32':         function(emu, args) { return 0; },
+
+            // crc32(crc, buf, len) → updated CRC
+            'crc32': function(emu, args) {
+                var crc = args[0], buf = args[1], len = args[2];
+                if (!buf || !len) return 0;
+                try {
+                    var data = emu.mem_read(buf, len);
+                    // CRC32 implementation
+                    var table = AndroidShims._crc32Table;
+                    if (!table) {
+                        table = new Uint32Array(256);
+                        for (var i = 0; i < 256; i++) {
+                            var c = i;
+                            for (var j = 0; j < 8; j++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+                            table[i] = c;
+                        }
+                        AndroidShims._crc32Table = table;
+                    }
+                    crc = (crc ^ 0xFFFFFFFF) >>> 0;
+                    for (var k = 0; k < data.length; k++) {
+                        crc = (table[(crc ^ data[k]) & 0xFF] ^ (crc >>> 8)) >>> 0;
+                    }
+                    return (crc ^ 0xFFFFFFFF) >>> 0;
+                } catch(e) { return 0; }
+            },
 
             // ============================================
             // OpenAL Audio (no-op)
@@ -2008,9 +2734,106 @@ const AndroidShims = {
                 return args[0];
             },
             'chdir': function(emu, args) { return 0; },
-            'opendir': function(emu, args) { return 0; },
-            'readdir': function(emu, args) { return 0; },
-            'closedir': function(emu, args) { return 0; },
+
+            // v28: Directory enumeration backed by VFS
+            'opendir': function(emu, args) {
+                var path = self._readCString(emu, args[0]);
+                Logger.info('[opendir] ATTEMPT: "' + path + '"');
+
+                if (!self.vfs || !path) return 0;
+
+                // Normalize: ensure path ends with /
+                var dirPath = path.replace(/\/+$/, '') + '/';
+                var normalized = self.vfs._normalizePath(dirPath);
+
+                // Collect filenames in this directory from VFS
+                var entries = [];
+                var seen = {};
+                for (var entry of self.vfs._files) {
+                    var key = entry[0]; // normalized VFS path
+                    if (key.indexOf(normalized) === 0) {
+                        // key starts with our dir path — extract the relative part
+                        var relative = key.substring(normalized.length);
+                        // Only direct children (no sub-slash), skip empty
+                        var slashIdx = relative.indexOf('/');
+                        var childName;
+                        if (slashIdx < 0) {
+                            childName = relative; // file
+                        } else {
+                            childName = relative.substring(0, slashIdx); // subdirectory
+                        }
+                        if (childName && !seen[childName]) {
+                            seen[childName] = true;
+                            entries.push(childName);
+                        }
+                    }
+                }
+
+                if (entries.length === 0) {
+                    Logger.info('[opendir] MISS (no entries): "' + path + '" normalized="' + normalized + '"');
+                    return 0; // NULL — directory not found
+                }
+
+                var handle = self._nextDirHandle++;
+                self._dirHandles.set(handle, { path: path, entries: entries, index: 0 });
+                Logger.info('[opendir] HIT: "' + path + '" → handle=0x' + handle.toString(16) + ' (' + entries.length + ' entries: ' + entries.slice(0, 10).join(', ') + (entries.length > 10 ? '...' : '') + ')');
+                return handle;
+            },
+
+            'readdir': function(emu, args) {
+                var handle = args[0];
+                var dir = self._dirHandles.get(handle);
+                if (!dir) return 0; // NULL — end of directory or invalid
+
+                if (dir.index >= dir.entries.length) {
+                    return 0; // NULL — no more entries
+                }
+
+                var name = dir.entries[dir.index++];
+
+                // Allocate a persistent dirent buffer if we haven't yet
+                // ARM dirent struct: d_ino(4) + d_off(4) + d_reclen(2) + d_type(1) + d_name(256)
+                if (!self._direntBuf) {
+                    self._direntBuf = self.malloc(280);
+                }
+                var buf = self._direntBuf;
+
+                // Write dirent struct
+                var bytes = [];
+                // d_ino (4 bytes) — fake inode
+                bytes.push(dir.index & 0xFF, (dir.index >> 8) & 0xFF, 0, 0);
+                // d_off (4 bytes) — fake offset
+                bytes.push(dir.index & 0xFF, 0, 0, 0);
+                // d_reclen (2 bytes)
+                var reclen = 11 + name.length + 1; // header + name + null
+                bytes.push(reclen & 0xFF, (reclen >> 8) & 0xFF);
+                // d_type (1 byte) — DT_REG=8 for files, DT_DIR=4 for dirs
+                bytes.push(8);
+                // d_name (null-terminated string)
+                for (var i = 0; i < name.length; i++) {
+                    bytes.push(name.charCodeAt(i) & 0xFF);
+                }
+                bytes.push(0); // null terminator
+                // Pad to 280 bytes total
+                while (bytes.length < 280) bytes.push(0);
+
+                emu.mem_write(buf, bytes);
+
+                if (dir.index <= 5) {
+                    Logger.info('[readdir] handle=0x' + handle.toString(16) + ' → "' + name + '" (' + dir.index + '/' + dir.entries.length + ')');
+                }
+
+                return buf;
+            },
+
+            'closedir': function(emu, args) {
+                var handle = args[0];
+                if (self._dirHandles.has(handle)) {
+                    Logger.info('[closedir] handle=0x' + handle.toString(16));
+                    self._dirHandles.delete(handle);
+                }
+                return 0;
+            },
             // ============================================
             // v26: Missing critical libc/ctype/C++ functions
             // ============================================
@@ -2414,7 +3237,14 @@ const AndroidShims = {
                 }
                 // VFS file read
                 if (self.vfs && fd >= 100) {
-                    return self.vfs.fread(fd, bufPtr, 1, len, emu) * 1;
+                    var result = self.vfs.fread(fd, bufPtr, 1, len, emu);
+                    // v27e: Log POSIX read() on VFS files
+                    if (self._posixReadLogCount === undefined) self._posixReadLogCount = 0;
+                    if (self._posixReadLogCount < 50) {
+                        self._posixReadLogCount++;
+                        Logger.info('[read] fd=' + fd + ' len=' + len + ' → ' + result + ' bytes');
+                    }
+                    return result;
                 }
                 return 0;
             },
