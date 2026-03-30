@@ -146,12 +146,33 @@ const AndroidShims = {
 
         Logger.info('[NET] HTTP Request: ' + method + ' ' + url + ' (body=' + (contentLength || 0) + ' bytes)');
 
-        // Route to GameServer
+        // v37: Route to REAL GameServer via sync XHR to proxy
         var response;
         try {
-            response = GameServer.handleRequest(method, url, headers, bodyBytes);
+            var proxyUrl = 'http://localhost:9090' + url;
+            Logger.info('[NET] → Proxy XHR: ' + method + ' ' + proxyUrl);
+            var xhr = new XMLHttpRequest();
+            xhr.open(method, proxyUrl, false); // synchronous
+            xhr.responseType = 'arraybuffer';
+            // Forward headers (skip host)
+            for (var hk in headers) {
+                if (hk !== 'host' && hk !== 'connection' && hk !== 'content-length') {
+                    try { xhr.setRequestHeader(hk, headers[hk]); } catch(e2) {}
+                }
+            }
+            if (bodyBytes) {
+                xhr.send(bodyBytes);
+            } else {
+                xhr.send();
+            }
+            Logger.info('[NET] ← Proxy response: ' + xhr.status + ' (' + (xhr.response ? xhr.response.byteLength : 0) + ' bytes)');
+            response = {
+                status: xhr.status,
+                headers: { 'content-type': xhr.getResponseHeader('content-type') || 'application/octet-stream' },
+                bodyBytes: xhr.response ? new Uint8Array(xhr.response) : new Uint8Array(0)
+            };
         } catch(e) {
-            Logger.error('[NET] GameServer error: ' + e.message);
+            Logger.error('[NET] Proxy XHR error: ' + e.message);
             response = { status: 500, headers: { 'Content-Type': 'text/plain' }, body: 'Internal Server Error' };
         }
 

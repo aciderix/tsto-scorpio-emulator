@@ -1,7 +1,7 @@
 {
   "name": "tsto-scorpio-emulator",
   "version": "15.5.0",
-  "description": "TSTO Scorpio Engine — ARM emulator in the browser via Unicorn.js + WebGL",
+  "description": "TSTO Scorpio Engine \u2014 ARM emulator in the browser via Unicorn.js + WebGL",
   "private": true,
   "scripts": {
     "deploy": "python3 scripts/deploy.py",
@@ -13,6 +13,19 @@
   },
   "dependencies": {
     "pako": "^2.1.0",
-    "puppeteer": "^22.0.0"
-  }
+    "puppeteer": "^22.0.0",
+    "puppeteer-core": "^24.40.0"
+  },
+  "main": "index.js",
+  "repository": {
+    "type": "git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/aciderix/tsto-scorpio-emulator/issues"
+  },
+  "homepage": "https://github.com/aciderix/tsto-scorpio-emulator#readme"
 }

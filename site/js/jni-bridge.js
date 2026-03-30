@@ -373,6 +373,12 @@ class JNIBridge {
                     var msg = self._strings.get(msgHandle) || self._strings.get(args[4]) || '?';
                     Logger.warn('[JNI] showDialog: title="' + title + '" msg="' + msg + '"');
 
+                    // v37: Schedule auto-dismiss of dialog via alertButtonPressed
+                    if (self.engine) {
+                        self.engine._pendingAlertDismiss = true;
+                        Logger.info('[v37] showDialog detected — scheduling alertButtonPressed(0) for next frame');
+                    }
+
                     // v32: If NO TEXT POOL, dump recent shim calls for diagnosis
                     if (title.indexOf('TEXT POOL') >= 0 || msg.indexOf('TEXT POOL') >= 0 ||
                         title === '?' || msg === '?') {

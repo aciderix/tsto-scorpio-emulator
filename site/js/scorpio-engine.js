@@ -1707,6 +1707,79 @@ class ScorpioEngine {
             Logger.warn('v13.2: Singleton pointer is NULL — render-ready flag NOT set');
         }
 
+        // === v37: Post-init auth bootstrapping ===
+        Logger.info('v37: Calling onNimblePushTNGReady');
+        results.push(this.callFunction('Java_com_ea_simpsons_ScorpioJNI_onNimblePushTNGReady', {
+            r0: this.jni.JNIENV_BASE,
+            r1: this.jni.JOBJECT_BASE,
+        }, true));
+
+        // === v38: Nimble Identity Component Bootstrap ===
+        // The game needs the Nimble SDK to setup Identity component and deliver auth token
+        // Call NimbleCppComponent_setup to trigger the Identity component flow
+        Logger.info('v38: Setting up Nimble Identity component via NimbleCppComponent_setup');
+        try {
+            // Pre-authenticate with GameServer-Reborn
+            var authXhr = new XMLHttpRequest();
+            authXhr.open('GET', 'http://localhost:9090/connect/auth?authenticator_login_type=mobile_anonymous&response_type=code', false);
+            authXhr.send();
+            var authCode = '';
+            try { authCode = JSON.parse(authXhr.responseText).code; } catch(e) {}
+            Logger.info('v38: Got auth code from GameServer: ' + (authCode ? authCode.substring(0, 20) + '...' : 'FAILED'));
+
+            if (authCode) {
+                // Get access token
+                var tokenXhr = new XMLHttpRequest();
+                tokenXhr.open('POST', 'http://localhost:9090/connect/token', false);
+                tokenXhr.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded');
+                tokenXhr.send('grant_type=authorization_code&code=' + authCode);
+                var tokenData = {};
+                try { tokenData = JSON.parse(tokenXhr.responseText); } catch(e) {}
+                Logger.info('v38: Token response: access_token=' + (tokenData.access_token ? tokenData.access_token.substring(0, 20) + '...' : 'NONE'));
+                Logger.info('v38: Token response: user_id=' + (tokenData.user_id || 'NONE'));
+
+                // Store auth data for JNI bridge to use
+                if (this.jni) {
+                    this.jni._authToken = tokenData.access_token || '';
+                    this.jni._userId = tokenData.user_id || '';
+                    this.jni._nucleusId = tokenData.user_id || '1000000000001';
+                    this.jni._sharedPreferences['CustomConfigBasicAuth'] = this.jni._authToken;
+                    Logger.info('v38: Auth data injected into JNI bridge');
+                }
+
+                // v38: Try calling NimbleCppComponent_setup with limited instructions
+                // to see what JNI calls it makes (avoid infinite loops)
+                Logger.info('v38: Calling NimbleCppComponent_setup (Identity) — limited to 10000 insns');
+                var savedMax = this.maxFrameInsns;
+                this.maxFrameInsns = 10000;
+                var setupResult = this.callFunction('Java_com_ea_nimble_bridge_NimbleCppComponentRegistrar_00024NimbleCppComponent_setup', {
+                    r0: this.jni.JNIENV_BASE,
+                    r1: this.jni.JOBJECT_BASE + 0x100, // fake NimbleCppComponent object
+                });
+                this.maxFrameInsns = savedMax;
+                Logger.info('v38: NimbleCppComponent_setup: ' + (setupResult ? setupResult.instructions + ' insns, R0=0x' + (setupResult.r0||0).toString(16) : 'null'));
+
+                // Try BaseNativeCallback_nativeCallback with limited insns
+                Logger.info('v38: Calling BaseNativeCallback_nativeCallback — limited to 10000 insns');
+                this.maxFrameInsns = 10000;
+                var callbackResult = this.callFunction('Java_com_ea_nimble_bridge_BaseNativeCallback_nativeCallback', {
+                    r0: this.jni.JNIENV_BASE,
+                    r1: this.jni.JOBJECT_BASE + 0x200, // fake callback object
+                });
+                this.maxFrameInsns = savedMax;
+                Logger.info('v38: BaseNativeCallback: ' + (callbackResult ? callbackResult.instructions + ' insns, R0=0x' + (callbackResult.r0||0).toString(16) : 'null'));
+            }
+        } catch(e) {
+            Logger.error('v38: Auth bootstrap error: ' + e.message);
+        }
+
+        Logger.info('v37: Re-granting external storage permission post-init');
+        results.push(this.callFunction('Java_com_ea_simpsons_ScorpioJNI_WriteExternalStoragePermissionResult', {
+            r0: this.jni.JNIENV_BASE,
+            r1: this.jni.JOBJECT_BASE,
+            r2: 1,
+        }, true));
+
         // Summary
         var succeeded = results.filter(function(r) { return r && r.success; }).length;
         var totalInsns = results.reduce(function(sum, r) { return sum + (r ? r.instructions || 0 : 0); }, 0);
@@ -1877,6 +1950,23 @@ class ScorpioEngine {
             this._writeU32ToEmu(this.BASE + 0x1A45728, this.savedSingletonPtr);
             // v34: Re-write loading state (ARM execution during LoadingScreen may clear it)
             this._writeU32ToEmu(this.savedSingletonPtr + 0x1B0, 1);
+        }
+
+        // v37: Auto-dismiss pending dialogs (External Storage Unavailable, etc.)
+        if (this._pendingAlertDismiss) {
+            this._pendingAlertDismiss = false;
+            Logger.info('[v37] Auto-dismissing dialog via alertButtonPressed(0)');
+            this.callFunction('Java_com_ea_simpsons_ScorpioJNI_alertButtonPressed', {
+                r0: this.jni.JNIENV_BASE,
+                r1: this.jni.JOBJECT_BASE,
+                r2: 0,
+            });
+            this.callFunction('Java_com_ea_simpsons_ScorpioJNI_WriteExternalStoragePermissionResult', {
+                r0: this.jni.JNIENV_BASE,
+                r1: this.jni.JOBJECT_BASE,
+                r2: 1,
+            });
+            Logger.info('[v37] Dialog dismissed + storage permission re-granted');
         }
 
         var frameResult = this.callFunction('Java_com_bight_android_jni_BGCoreJNIBridge_OGLESRender',
